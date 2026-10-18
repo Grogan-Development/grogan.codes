@@ -36,7 +36,7 @@ Settings are stored in the macOS Keychain under the service `codespace` (the app
 
 ## Workspaces
 
-- Each workspace holds zero or more repos under `~/workspace` on its instance. You pick the instance type when you create it: Graviton (arm64) or x86 CPU types, or a GPU type, from fractions of an L4 up to an H100. The picker shows the on-demand price and, when AWS returns it, the live spot price.
+- Each workspace holds zero or more repos under `~/workspace` on its instance. When you create one you say what it needs (minimum vCPU and RAM, arm64 or x86_64, and optionally a GPU model and VRAM), and the picker lists the matching types, cheapest first for the chosen market, and selects the cheapest. Types range from Graviton and x86 CPU types to GPUs from a shared L4 up to an H100. Spot prices are live, from the cheapest ready region. Workspaces are Linux only.
 - **Region** defaults to **Cheapest**, resolved when you create the workspace: for spot, the ready region with the lowest current spot price for the type; for on-demand, where prices are equal, the region with the best capacity. The picker shows where Cheapest would land and the price there. You can also pick a region by name; regions without the infra stack, without a built image, or that don't offer the type are greyed out with the reason. The workspace stays in its region for life.
 - **Hibernate** saves memory to the disk and stops the instance, so running processes come back on start. Every CPU type supports it. GPU types can't hibernate, so for them Pause is a plain stop.
 - **Stop** keeps the disk and ends running processes. A stopped instance costs only its disk (gp3, about $0.08 per GB-month).
@@ -59,8 +59,9 @@ Settings are stored in the macOS Keychain under the service `codespace` (the app
   - Context and usage meters.
 - **Panels**: Terminal (ttyd), Browser (VNC desktop with Chromium, started on demand), Diff, Loadout, and Ports. Terminal, desktop and port previews are forwarded over the SSH connection to local ports, so their links look like `http://127.0.0.1:<port>/` and only work on this Mac.
 - **Loadouts**: a catalog imported from `~/.claude` (plugins, skills, agents, commands, workflows, CLAUDE.md) plus MCP servers you add.
-  - Pick a set per workspace and save named presets.
+  - New workspaces get every item. Trim a workspace's set in its Loadout panel, and save named presets.
   - A loadout is applied to the instance's `~/.claude` when a thread next starts.
+- **Global instructions**: edited in Settings and written to `~/.claude/CLAUDE.md` in every workspace when a thread starts, above your personal CLAUDE.md. "Reset to default" brings back the built-in text.
 
 ## Checking the AWS integration
 

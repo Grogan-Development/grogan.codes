@@ -2,6 +2,7 @@ import { createWorkspace, listRepos, listWorkspaces, workspaceJson } from "@/ser
 import { DEFAULT_DISK_GB, DEFAULT_MACHINE, type Market } from "@/server/aws/machines";
 import { listThreads } from "@/server/threads";
 import { handle, json } from "@/server/http";
+import { defaultLoadout } from "@/server/catalog";
 
 export const dynamic = "force-dynamic";
 
@@ -52,7 +53,7 @@ export const POST = handle(async (req: Request) => {
         diskGb: body.diskGb ?? DEFAULT_DISK_GB,
         idleMinutes: body.idleMinutes ?? 30,
         repos: body.repos ?? [],
-        loadout: body.loadout ?? [],
+        loadout: body.loadout ?? defaultLoadout(),
       }),
     ),
   );

@@ -124,14 +124,19 @@ export async function workspaceRemote(id: string): Promise<Remote> {
 }
 
 /** Normalize "owner/repo", https or ssh GitHub URLs into a clone URL and a folder name. */
-export function parseRepo(input: string): { url: string; name: string } {
-  const s = input.trim().replace(/\/+$/, "").replace(/\.git$/, "");
+/** "owner/repo", https or ssh GitHub URLs, optionally "#branch", into a clone URL, folder name and branch. */
+export function parseRepo(input: string): { url: string; name: string; branch: string | null } {
+  const [spec, ref] = input.trim().split("#", 2);
+  const s = spec.replace(/\/+$/, "").replace(/\.git$/, "");
   const short = s.match(/^([\w.-]+)\/([\w.-]+)$/);
   const ssh = s.match(/^git@([^:]+):(.+)$/);
   const url = short ? `https://github.com/${short[1]}/${short[2]}.git` : ssh ? `https://${ssh[1]}/${ssh[2]}.git` : `${s}.git`;
   const name = url.split("/").pop()!.replace(/\.git$/, "");
   assertRepoName(name, input);
-  return { url, name };
+  const branch = ref?.trim() || null;
+  // Branch names reach a shell (quoted) and git; refuse anything git itself wouldn't accept.
+  if (branch && (!/^[\w./-]+$/.test(branch) || branch.startsWith("-") || branch.includes(".."))) throw new Error(`"${branch}" isn't a valid branch name`);
+  return { url, name, branch };
 }
 
 /** The name becomes a folder under ~/workspace that removal deletes, so it must be one plain path segment. */
@@ -167,8 +172,8 @@ export async function createWorkspace(input: {
        VALUES (?, ?, 'creating', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(id, input.name, input.instanceType, input.instanceType, input.market, region, input.diskGb, input.idleMinutes, JSON.stringify(input.loadout), t, t);
-  for (const { url, name } of repos) {
-    db().prepare("INSERT INTO repos (id, workspace_id, name, url, state) VALUES (?, ?, ?, ?, 'pending')").run(nanoid(10), id, name, url);
+  for (const { url, name, branch } of repos) {
+    db().prepare("INSERT INTO repos (id, workspace_id, name, url, branch, state) VALUES (?, ?, ?, ?, ?, 'pending')").run(nanoid(10), id, name, url, branch);
   }
   void provision(id);
   return getWorkspace(id);
@@ -284,9 +289,9 @@ export async function bootstrap(r: Remote) {
 }
 
 export function addRepo(workspaceId: string, input: string) {
-  const { url, name } = parseRepo(input);
+  const { url, name, branch } = parseRepo(input);
   const id = nanoid(10);
-  db().prepare("INSERT INTO repos (id, workspace_id, name, url, state) VALUES (?, ?, ?, ?, 'pending')").run(id, workspaceId, name, url);
+  db().prepare("INSERT INTO repos (id, workspace_id, name, url, branch, state) VALUES (?, ?, ?, ?, ?, 'pending')").run(id, workspaceId, name, url, branch);
   void cloneRepo(workspaceId, id);
   return id;
 }
@@ -299,7 +304,7 @@ async function cloneRepo(workspaceId: string, repoId: string) {
     setRepo("cloning");
     const r = await ensureStarted(workspaceId);
     const dest = `${WORKSPACE_ROOT}/${repo.name}`;
-    await mustRun(r, `test -d ${q(dest)}/.git || git clone ${q(repo.url)} ${q(dest)}`, { timeout: 1800 });
+    await mustRun(r, `test -d ${q(dest)}/.git || git clone ${repo.branch ? `--branch ${q(repo.branch)} ` : ""}${q(repo.url)} ${q(dest)}`, { timeout: 1800 });
     const branch = (await run(r, `git -C ${q(dest)} rev-parse --abbrev-ref HEAD`)).output.trim();
     db().prepare("UPDATE repos SET branch = ? WHERE id = ?").run(branch, repoId);
     setRepo("ready");
@@ -708,10 +713,12 @@ export async function previewUrl(id: string, port: number) {
   return `http://127.0.0.1:${await localPort(id, port)}/`;
 }
 
+/** Waits (on the instance) until something answers on a local port, for up to ~15s. */
+export const untilListening = (port: number) => `for i in $(seq 1 50); do curl -s -o /dev/null localhost:${port} && break; sleep 0.3; done`;
+
 export async function terminalUrl(id: string) {
   const r = await ensureStarted(id);
-  await run(r, `pgrep -x ttyd >/dev/null || (cd ${WORKSPACE_ROOT} && nohup ttyd -p ${TERMINAL_PORT} -W bash >/tmp/ttyd.log 2>&1 &)`);
-  await new Promise((res) => setTimeout(res, 500));
+  await run(r, `pgrep -x ttyd >/dev/null || (cd ${WORKSPACE_ROOT} && nohup ttyd -p ${TERMINAL_PORT} -W bash >/tmp/ttyd.log 2>&1 &); ${untilListening(TERMINAL_PORT)}`);
   return previewUrl(id, TERMINAL_PORT);
 }
 
@@ -725,7 +732,7 @@ export async function startDesktop(id: string) {
       `pgrep -x xfce4-session >/dev/null || (DISPLAY=:0 nohup startxfce4 >/tmp/xfce.log 2>&1 &)`,
       `pgrep -x x11vnc >/dev/null || (nohup x11vnc -display :0 -forever -nopw -shared -rfbport 5900 >/tmp/x11vnc.log 2>&1 &)`,
       `curl -s -o /dev/null localhost:${VNC_PORT} || (nohup websockify --web /usr/share/novnc ${VNC_PORT} localhost:5900 >/tmp/ws.log 2>&1 &)`,
-      `sleep 2`,
+      untilListening(VNC_PORT),
     ].join("; "),
     // Checks use exact process names or the port: `pgrep -f` would match this shell's own
     // command line, which names every process it is about to start.

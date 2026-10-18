@@ -504,6 +504,32 @@ export function appPolicyDocument(partition: string, account: string): iam.Polic
         resources: [`arn:${partition}:ec2:*::snapshot/*`],
         conditions: tagged,
       }),
+      // Restoring from cold storage: EC2 won't swap the root snapshot in RunInstances, so the
+      // app registers a throwaway AMI over the workspace's snapshot, launches it, deregisters it.
+      new iam.PolicyStatement({
+        sid: "RegisterRestoreImage",
+        actions: ["ec2:RegisterImage"],
+        resources: [`arn:${partition}:ec2:*::image/*`],
+        conditions: { StringEquals: { [`aws:RequestTag/${TAG_APP.Key}`]: TAG_APP.Value } },
+      }),
+      new iam.PolicyStatement({
+        sid: "RegisterFromTaggedSnapshot",
+        actions: ["ec2:RegisterImage"],
+        resources: [`arn:${partition}:ec2:*::snapshot/*`],
+        conditions: tagged,
+      }),
+      new iam.PolicyStatement({
+        sid: "TagImageOnRegister",
+        actions: ["ec2:CreateTags"],
+        resources: [`arn:${partition}:ec2:*::image/*`],
+        conditions: { StringEquals: { "ec2:CreateAction": "RegisterImage" } },
+      }),
+      new iam.PolicyStatement({
+        sid: "DeregisterTaggedImage",
+        actions: ["ec2:DeregisterImage"],
+        resources: [`arn:${partition}:ec2:*::image/*`],
+        conditions: tagged,
+      }),
       new iam.PolicyStatement({
         sid: "TagOnCreate",
         actions: ["ec2:CreateTags"],

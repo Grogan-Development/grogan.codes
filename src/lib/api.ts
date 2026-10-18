@@ -121,3 +121,47 @@ export type MachinesInfo = {
   /** Current lowest spot price, by region then type. */
   spot: Record<string, Record<string, number>>;
 };
+
+/** Mirrors `PARAMS.amiId` in src/server/aws/config.ts, which can't be imported client-side. */
+export const AMI_PARAM = "/codespace/ami/";
+
+/**
+ * The SSM parameter names in a region's `missing` list. Entries can carry a note after the name
+ * ("/codespace/ami/gpu-x86 (not built yet: …)"); entries that aren't parameters (a timed-out
+ * check) are dropped, so compare the length with `missing` to spot them.
+ */
+export function missingParams(r: RegionStatus): string[] {
+  return r.missing.filter((n) => n.startsWith("/")).map((n) => n.split(" ")[0]);
+}
+
+export type RegionSummary = {
+  /** ok: everything built; warn: stack deployed, some images still missing; bad: deploy needed or unknown. */
+  tone: "ok" | "warn" | "bad";
+  text: string;
+  /** At least one image is ready, so some instance types can launch here. */
+  usable: boolean;
+};
+
+/**
+ * One line about a region's infra. Missing AMI params mean images still building, which is not
+ * the same as a missing stack: only network or launch-template params mean "deploy infra/".
+ */
+export function regionSummary(r: RegionStatus): RegionSummary {
+  if (r.ok) return { tone: "ok", text: "Ready", usable: true };
+  const params = missingParams(r);
+  if (!params.length || params.length < r.missing.length) return { tone: "bad", text: r.error || r.missing.join(", ") || "Couldn't check this region.", usable: false };
+  if (params.some((n) => !n.startsWith(AMI_PARAM))) return { tone: "bad", text: `Deploy infra/ in ${r.region}`, usable: false };
+  const missing = new Set(params.map((n) => n.slice(AMI_PARAM.length)));
+  const group = (label: string, variants: string[]) => {
+    const gone = variants.filter((v) => missing.has(v));
+    if (!gone.length) return `${label} images ready`;
+    if (gone.length === variants.length) return `${label} images building`;
+    return `${label} images building (${gone.map((v) => v.split("-")[1]).join(", ")})`;
+  };
+  const all = ["cpu-arm64", "cpu-x86", "gpu-arm64", "gpu-x86"];
+  return {
+    tone: "warn",
+    text: `${group("CPU", all.slice(0, 2))} · ${group("GPU", all.slice(2))}`,
+    usable: all.some((v) => !missing.has(v)),
+  };
+}

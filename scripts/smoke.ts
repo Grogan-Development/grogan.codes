@@ -19,7 +19,7 @@ import {
   deleteSnapshot,
 } from "../src/server/aws/ec2";
 import { waitForRemote, forgetRemote, setInstanceRegion, forwardPort, run, WORKSPACE_ROOT, VNC_PORT, TERMINAL_PORT } from "../src/server/remote";
-import { bootstrap } from "../src/server/workspaces";
+import { bootstrap, untilListening } from "../src/server/workspaces";
 import { spawnRemote } from "../src/server/transport";
 import { getSecret } from "../src/server/secrets";
 
@@ -79,7 +79,7 @@ async function main() {
   }
 
   step("terminal (ttyd) through a port forward");
-  await run(r, `nohup ttyd -p ${TERMINAL_PORT} -W bash >/tmp/ttyd.log 2>&1 & sleep 1`);
+  await run(r, `nohup ttyd -p ${TERMINAL_PORT} -W bash >/tmp/ttyd.log 2>&1 & ${untilListening(TERMINAL_PORT)}`);
   const tp = await forwardPort(l.instanceId, TERMINAL_PORT);
   console.log(`  http://127.0.0.1:${tp}/ → HTTP ${(await fetch(`http://127.0.0.1:${tp}/`)).status}`);
   console.log(`  websocket → ${await wsOpens(`ws://127.0.0.1:${tp}/ws`, "tty")}`);
@@ -87,7 +87,7 @@ async function main() {
   step("desktop (Xvfb + websockify) through a port forward");
   await run(
     r,
-    `(nohup Xvfb :0 -screen 0 1280x800x24 >/tmp/xvfb.log 2>&1 &); sleep 1; (DISPLAY=:0 nohup startxfce4 >/tmp/xfce.log 2>&1 &); (nohup x11vnc -display :0 -forever -nopw -shared -rfbport 5900 >/tmp/x11vnc.log 2>&1 &); (nohup websockify --web /usr/share/novnc ${VNC_PORT} localhost:5900 >/tmp/ws.log 2>&1 &); sleep 3`,
+    `(nohup Xvfb :0 -screen 0 1280x800x24 >/tmp/xvfb.log 2>&1 &); sleep 1; (DISPLAY=:0 nohup startxfce4 >/tmp/xfce.log 2>&1 &); (nohup x11vnc -display :0 -forever -nopw -shared -rfbport 5900 >/tmp/x11vnc.log 2>&1 &); (nohup websockify --web /usr/share/novnc ${VNC_PORT} localhost:5900 >/tmp/ws.log 2>&1 &); ${untilListening(VNC_PORT)}`,
   );
   const vp = await forwardPort(l.instanceId, VNC_PORT);
   console.log(`  vnc.html → HTTP ${(await fetch(`http://127.0.0.1:${vp}/vnc.html`)).status}`);

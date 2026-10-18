@@ -7,16 +7,17 @@ import { Button, ColdTag, Icon, Input, Logo, MarketTag, Spinner, StateDot } from
 import { Composer } from "./composer/Composer";
 import { LoadoutPicker } from "./LoadoutPicker";
 import { DeleteWorkspace } from "./DeleteFlow";
+import { RepoCombobox, repoSpec } from "./RepoPicker";
 
 type Full = Workspace & { threads: Thread[] };
 type Panel = "diff" | "terminal" | "browser" | "ports" | "loadout";
 
-const PANELS: { id: Panel; label: string; icon: "diff" | "terminal" | "browser" | "ports" | "loadout" }[] = [
+const PANELS: { id: Panel; label: string; icon: "diff" | "terminal" | "browser" | "ports" | "loadout"; hint?: string }[] = [
   { id: "diff", label: "Diff", icon: "diff" },
   { id: "terminal", label: "Terminal", icon: "terminal" },
   { id: "browser", label: "Browser", icon: "browser" },
   { id: "ports", label: "Ports", icon: "ports" },
-  { id: "loadout", label: "Loadout", icon: "loadout" },
+  { id: "loadout", label: "Loadout", icon: "loadout", hint: "Loadout: plugins, skills, MCP servers, instructions" },
 ];
 
 /** Per-viewer dock layout; storage can be unavailable (private windows), so every access is guarded. */
@@ -230,7 +231,7 @@ export function WorkspaceView({ id }: { id: string }) {
               <button
                 key={p.id}
                 aria-label={p.label}
-                title={p.label}
+                title={p.hint ?? p.label}
                 onClick={() => (setPanel(p.id), setDockOpen(true))}
                 className="flex size-10 items-center justify-center rounded-lg text-muted hover:bg-panel-3 hover:text-text"
               >
@@ -389,23 +390,25 @@ function Repos({ ws, reload }: { ws: Full; reload: () => void }) {
           </button>
         </div>
       ))}
-      <form
-        className="px-1 pt-1"
-        onSubmit={async (e) => {
-          e.preventDefault();
-          if (!adding.trim()) return;
-          setErr("");
-          try {
-            await api(`/api/workspaces/${ws.id}/repos`, { method: "POST", json: { repo: adding } });
-            setAdding("");
-            reload();
-          } catch (e) {
-            setErr(String(e instanceof Error ? e.message : e));
-          }
-        }}
-      >
-        <Input aria-label="Add repo" value={adding} onChange={(e) => setAdding(e.target.value)} placeholder="+ owner/repo" className="w-full py-1 font-mono text-xs" />
-      </form>
+      <div className="mx-1 mt-1 rounded-lg border border-line-2 bg-panel-2 px-2 py-0.5 focus-within:border-accent">
+        <RepoCombobox
+          dropUp
+          placeholder={adding ? "Cloning…" : "+ add a repo"}
+          exclude={ws.repos.map((r) => r.url.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, ""))}
+          onPick={async (c) => {
+            setErr("");
+            setAdding(c.spec);
+            try {
+              await api(`/api/workspaces/${ws.id}/repos`, { method: "POST", json: { repo: repoSpec(c) } });
+              reload();
+            } catch (e) {
+              setErr(String(e instanceof Error ? e.message : e));
+            } finally {
+              setAdding("");
+            }
+          }}
+        />
+      </div>
       {err && <p className="px-2 pt-1 text-xs text-bad">{err}</p>}
     </div>
   );
@@ -568,6 +571,13 @@ function LoadoutPanel({ ws, reload }: { ws: Full; reload: () => void }) {
   const [saved, setSaved] = useState(false);
   return (
     <div className="space-y-3 overflow-y-auto p-4">
+      <div className="space-y-1">
+        <h3 className="text-[13px] font-semibold">What Claude gets in this workspace</h3>
+        <p className="text-xs leading-relaxed text-muted">
+          Plugins, skills, agents, commands, MCP servers and instructions from your <code className="font-mono">~/.claude</code>. New workspaces start with everything; uncheck
+          what you don&apos;t need here. Changes apply when a thread next starts.
+        </p>
+      </div>
       <LoadoutPicker value={value} onChange={(v) => (setValue(v), setSaved(false))} />
       <div className="flex items-center gap-2">
         <Button

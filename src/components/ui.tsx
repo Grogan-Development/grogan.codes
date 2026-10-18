@@ -3,6 +3,9 @@
 import Link from "next/link";
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
 
+/** Keyboard focus ring; mouse clicks don't show it. */
+export const FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-accent/70";
+
 type Variant = "default" | "primary" | "danger" | "ghost" | "attn";
 
 const VARIANTS: Record<Variant, string> = {
@@ -23,7 +26,7 @@ export function Button({
   return (
     <button
       {...props}
-      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg font-medium transition disabled:opacity-40 disabled:pointer-events-none ${sizing} ${VARIANTS[variant]} ${className}`}
+      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg font-medium transition disabled:opacity-40 disabled:pointer-events-none ${FOCUS} ${sizing} ${VARIANTS[variant]} ${className}`}
     />
   );
 }
@@ -62,7 +65,7 @@ export function Segmented<T extends string | number>({
           title={o.title}
           aria-pressed={o.value === value}
           onClick={() => onChange(o.value)}
-          className={`h-6 rounded-md px-2.5 text-xs font-medium transition ${stretch ? "flex-1" : ""} ${
+          className={`h-6 rounded-md px-2.5 text-xs font-medium transition ${FOCUS} ${stretch ? "flex-1" : ""} ${
             o.value === value ? "bg-[#2a2d27] text-text" : "text-muted hover:text-text"
           }`}
         >
@@ -131,7 +134,17 @@ export function Logo() {
 
 export function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-4 sm:p-6" onMouseDown={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-4 sm:p-6"
+      onMouseDown={onClose}
+      onKeyDown={(e) => {
+        // Escape closes the innermost modal only; nested modals stop it here.
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          onClose();
+        }
+      }}
+    >
       <div
         role="dialog"
         aria-label={title}

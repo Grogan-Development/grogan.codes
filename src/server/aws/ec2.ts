@@ -14,6 +14,9 @@ import {
   CreateSnapshotCommand,
   DescribeSnapshotsCommand,
   DeleteSnapshotCommand,
+  RegisterImageCommand,
+  DeregisterImageCommand,
+  type Image,
   type Instance,
   type InstanceStateName,
   type ResourceType,
@@ -187,20 +190,44 @@ export function explainAwsError(err: unknown, ctx: { type?: string; market?: Mar
 
 // ---- Launch -----------------------------------------------------------------
 
-const rootDevices = new Map<string, { name: string; snapshotGb: number }>();
+const rootDevices = new Map<string, { name: string; snapshotGb: number; image: Image }>();
 
 /** The AMI's root device and its snapshot size: a root volume can't be smaller than the snapshot. */
-async function rootDevice(amiId: string, region: string): Promise<{ name: string; snapshotGb: number }> {
+async function rootDevice(amiId: string, region: string): Promise<{ name: string; snapshotGb: number; image: Image }> {
   const hit = rootDevices.get(`${region}:${amiId}`);
   if (hit) return hit;
   const res = await ec2(region).send(new DescribeImagesCommand({ ImageIds: [amiId] }));
   const img = res.Images?.[0];
   const name = img?.RootDeviceName;
-  if (!name) throw new Error(`AMI ${amiId} not found in ${region}. Rebuild the image or redeploy the infra/ stack.`);
+  if (!img || !name) throw new Error(`AMI ${amiId} not found in ${region}. Rebuild the image or redeploy the infra/ stack.`);
   const snapshotGb = img.BlockDeviceMappings?.find((b) => b.DeviceName === name)?.Ebs?.VolumeSize ?? 0;
-  const dev = { name, snapshotGb };
+  const dev = { name, snapshotGb, image: img };
   rootDevices.set(`${region}:${amiId}`, dev);
   return dev;
+}
+
+/**
+ * EC2 won't swap the root snapshot in RunInstances, so a cold-stored workspace boots from a
+ * throwaway AMI registered over its snapshot, with the same boot settings as the workspace AMI.
+ * The caller deregisters it once the launch is in; the instance keeps its own volume.
+ */
+async function registerRestoreAmi(base: Image, device: string, snapshotId: string, workspaceId: string, region: string): Promise<string> {
+  const res = await ec2(region).send(
+    new RegisterImageCommand({
+      Name: `codespace-restore-${workspaceId}-${Date.now()}`,
+      Description: `codespace ${workspaceId} cold storage restore`,
+      Architecture: base.Architecture,
+      BootMode: base.BootMode,
+      EnaSupport: base.EnaSupport,
+      ImdsSupport: base.ImdsSupport,
+      VirtualizationType: "hvm",
+      RootDeviceName: device,
+      BlockDeviceMappings: [{ DeviceName: device, Ebs: { SnapshotId: snapshotId, VolumeType: "gp3", DeleteOnTermination: true } }],
+      TagSpecifications: [{ ResourceType: "image", Tags: [{ ...TAG_APP }, { Key: TAG_WORKSPACE, Value: workspaceId }] }],
+    }),
+  );
+  if (!res.ImageId) throw new Error("RegisterImage returned no image");
+  return res.ImageId;
 }
 
 type Placement = { subnetId: string; az: string; azId: string };
@@ -280,47 +307,55 @@ export async function launchInstance(opts: {
     const device = root.name;
     // GPU AMIs (the Deep Learning base) ship a root snapshot bigger than the smallest disk step.
     let volumeGb = rootVolumeGb(m, Math.max(opts.diskGb, root.snapshotGb));
+    let restoreAmi: string | undefined;
     if (opts.snapshotId) {
       const snap = await snapshotState(opts.snapshotId, region);
       if (snap?.state !== "completed") throw new Error(`Snapshot ${opts.snapshotId} is ${snap?.state ?? "gone"}, so the workspace can't be restored from it.`);
       volumeGb = Math.max(volumeGb, snap.volumeGb);
+      restoreAmi = await registerRestoreAmi(root.image, device, opts.snapshotId, workspaceId, region);
     }
     const tags: Tag[] = [{ ...TAG_APP }, { Key: TAG_WORKSPACE, Value: workspaceId }, { Key: "Name", Value: `codespace-${workspaceId}` }];
     const resources: ResourceType[] = ["instance", "volume", ...(market === "spot" ? (["spot-instances-request"] as const) : [])];
     const nonce = Date.now().toString(36);
     let last: unknown;
-    for (const p of await placements(m.type, market, region)) {
-      try {
-        const res = await ec2(region).send(
-          new RunInstancesCommand({
-            LaunchTemplate: { LaunchTemplateId: templateId, Version: "$Default" },
-            InstanceType: m.type as _InstanceType,
-            MinCount: 1,
-            MaxCount: 1,
-            SubnetId: p.subnetId,
-            BlockDeviceMappings: [
-              { DeviceName: device, Ebs: { SnapshotId: opts.snapshotId, VolumeSize: volumeGb, VolumeType: "gp3", Encrypted: true, DeleteOnTermination: true } },
-            ],
-            HibernationOptions: m.hibernate ? { Configured: true } : undefined,
-            InstanceMarketOptions:
-              market === "spot"
-                ? { MarketType: "spot", SpotOptions: { SpotInstanceType: "persistent", InstanceInterruptionBehavior: m.hibernate ? "hibernate" : "stop" } }
-                : undefined,
-            TagSpecifications: resources.map((ResourceType) => ({ ResourceType, Tags: tags })),
-            UserData: userData(),
-            // Same token across the SDK's own retries, fresh per launch attempt and subnet.
-            ClientToken: `${workspaceId}-${nonce}-${p.subnetId}`.slice(0, 64),
-          }),
-        );
-        const inst = res.Instances?.[0];
-        if (!inst?.InstanceId) throw new Error("RunInstances returned no instance");
-        return { instanceId: inst.InstanceId, az: inst.Placement?.AvailabilityZone ?? p.az, volumeGb, hibernate: m.hibernate };
-      } catch (err) {
-        if (!isCapacity(err)) throw err;
-        last = err;
+    try {
+      for (const p of await placements(m.type, market, region)) {
+        try {
+          const res = await ec2(region).send(
+            new RunInstancesCommand({
+              LaunchTemplate: { LaunchTemplateId: templateId, Version: "$Default" },
+              ImageId: restoreAmi,
+              InstanceType: m.type as _InstanceType,
+              MinCount: 1,
+              MaxCount: 1,
+              SubnetId: p.subnetId,
+              BlockDeviceMappings: [
+                { DeviceName: device, Ebs: { VolumeSize: volumeGb, VolumeType: "gp3", Encrypted: true, DeleteOnTermination: true } },
+              ],
+              HibernationOptions: m.hibernate ? { Configured: true } : undefined,
+              InstanceMarketOptions:
+                market === "spot"
+                  ? { MarketType: "spot", SpotOptions: { SpotInstanceType: "persistent", InstanceInterruptionBehavior: m.hibernate ? "hibernate" : "stop" } }
+                  : undefined,
+              TagSpecifications: resources.map((ResourceType) => ({ ResourceType, Tags: tags })),
+              UserData: userData(),
+              // Same token across the SDK's own retries, fresh per launch attempt and subnet.
+              ClientToken: `${workspaceId}-${nonce}-${p.subnetId}`.slice(0, 64),
+            }),
+          );
+          const inst = res.Instances?.[0];
+          if (!inst?.InstanceId) throw new Error("RunInstances returned no instance");
+          return { instanceId: inst.InstanceId, az: inst.Placement?.AvailabilityZone ?? p.az, volumeGb, hibernate: m.hibernate };
+        } catch (err) {
+          if (!isCapacity(err)) throw err;
+          last = err;
+        }
       }
+      throw last ?? new Error(`No subnet could launch ${m.type}`);
+    } finally {
+      // The new instance already has its own volume, so the throwaway AMI can go right away.
+      if (restoreAmi) await ec2(region).send(new DeregisterImageCommand({ ImageId: restoreAmi })).catch(() => {});
     }
-    throw last ?? new Error(`No subnet could launch ${m.type}`);
   } catch (err) {
     throw explainAwsError(err, ctx);
   }

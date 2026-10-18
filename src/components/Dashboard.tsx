@@ -3,13 +3,14 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { AwsStatus } from "@/server/aws/config";
-import { api, diskUse, RESTORE_HINT, dollars, gpuShare, machineLabel, timeAgo, type MachinesInfo, type Market, type RegionStatus, type Thread, type Workspace } from "@/lib/api";
+import { api, diskUse, regionSummary, RESTORE_HINT, dollars, gpuShare, machineLabel, timeAgo, type MachinesInfo, type Market, type RegionStatus, type Thread, type Workspace } from "@/lib/api";
 import { bestSpot, estimate, InstancePicker, RegionPicker, regionBlocker, resolveCheapest } from "./InstancePicker";
 import { ThreadSquares } from "./ThreadSquares";
 import type { PermissionEvent } from "./composer/model";
 import { Button, ColdTag, Icon, Input, Logo, MarketTag, Modal, Segmented, StateDot } from "./ui";
-import { LoadoutPicker } from "./LoadoutPicker";
 import { DeleteWorkspace } from "./DeleteFlow";
+import { InstructionsEditor } from "./InstructionsEditor";
+import { RepoChips, repoSpec, type RepoChoice } from "./RepoPicker";
 
 type Settings = {
   aws: AwsStatus & { regions: RegionStatus[] };
@@ -21,7 +22,7 @@ type Settings = {
 };
 
 /** AWS is usable with working credentials, the SSM plugin, and the infra stack in at least one region. */
-const awsReady = (s: Settings) => s.aws.ok && s.aws.regions.some((r) => r.ok) && s.ssmPlugin;
+const awsReady = (s: Settings) => s.aws.ok && s.aws.regions.some((r) => regionSummary(r).usable) && s.ssmPlugin;
 type Attention = { thread: Thread & { workspace_name: string }; pending: PermissionEvent[] };
 
 export function Dashboard() {
@@ -289,8 +290,7 @@ function AttentionCard({ a, onDone }: { a: Attention; onDone: () => void }) {
 
 function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const [name, setName] = useState("");
-  const [repos, setRepos] = useState<string[]>([]);
-  const [repoDraft, setRepoDraft] = useState("");
+  const [repos, setRepos] = useState<RepoChoice[]>([]);
   const [info, setInfo] = useState<MachinesInfo | null>(null);
   const [infoError, setInfoError] = useState("");
   const [type, setType] = useState("");
@@ -298,7 +298,6 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
   const [region, setRegion] = useState("auto");
   const [diskGb, setDiskGb] = useState(0);
   const [idle, setIdle] = useState(30);
-  const [loadout, setLoadout] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -319,22 +318,32 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
   const blocker = selected && info && named ? regionBlocker(named, selected, info.offered) : null;
   const cost = selected && info ? estimate(selected, market, diskGb, landing ? info.spot[landing]?.[selected.type] : undefined) : null;
   const best = selected && info ? bestSpot(info, selected) : null;
-  const ready = !!name.trim() && !!selected && !!landing && !blocker && !busy;
+  // Why Create is disabled, shown next to the button (a disabled button can't show a tooltip).
+  const why = !info
+    ? infoError
+      ? "Instance types didn't load"
+      : "Loading instance types…"
+    : !selected
+      ? "Nothing matches the instance filters"
+      : blocker
+        ? `${region} can't run ${selected.type}`
+        : !landing
+          ? `No region can run ${selected.type} yet`
+          : !name.trim()
+            ? "Name the workspace"
+            : "";
+  const ready = !why && !busy;
 
-  const addRepo = () => {
-    const r = repoDraft.trim().replace(/,$/, "");
-    if (r && !repos.includes(r)) setRepos([...repos, r]);
-    setRepoDraft("");
-  };
 
   const create = async () => {
     setBusy(true);
     setError("");
     try {
-      const all = repoDraft.trim() ? [...repos, repoDraft.trim()] : repos;
+      const all = repos.map(repoSpec);
       await api("/api/workspaces", {
         method: "POST",
-        json: { name, instanceType: type, market, region, diskGb, idleMinutes: idle, repos: all, loadout },
+        // No loadout: the server gives new workspaces every catalog item; trim it in the workspace.
+        json: { name, instanceType: type, market, region, diskGb, idleMinutes: idle, repos: all },
       });
       onCreated();
     } catch (e) {
@@ -369,39 +378,8 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
             </label>
 
             <div className="flex flex-col gap-2">
-              <label htmlFor="repo" className="text-xs font-semibold text-text-2">
-                Repos
-              </label>
-              <div className="flex flex-wrap items-center gap-1.5 rounded-[10px] border border-line-2 bg-panel-2 p-2 focus-within:border-accent">
-                {repos.map((r) => (
-                  <span key={r} className="inline-flex items-center gap-1.5 rounded-[7px] bg-[#23301a] py-1 pr-1.5 pl-2.5 font-mono text-xs text-[#ddf5a0]">
-                    {r}
-                    <button type="button" aria-label={`Remove ${r}`} onClick={() => setRepos(repos.filter((x) => x !== r))} className="px-0.5">
-                      ×
-                    </button>
-                  </span>
-                ))}
-                <input
-                  id="repo"
-                  value={repoDraft}
-                  onChange={(e) => setRepoDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if ((e.key === "Enter" && !e.metaKey && !e.ctrlKey) || e.key === ",") {
-                      e.preventDefault();
-                      addRepo();
-                    }
-                    if (e.key === "Backspace" && !repoDraft && repos.length) setRepos(repos.slice(0, -1));
-                  }}
-                  onBlur={addRepo}
-                  placeholder={repos.length ? "Add another" : "owner/repo or URL, then Enter"}
-                  className="h-7 min-w-40 flex-1 bg-transparent font-mono text-xs outline-none placeholder:text-faint"
-                />
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-2">
-              <span className="text-xs font-semibold text-text-2">Loadout</span>
-              <LoadoutPicker value={loadout} onChange={setLoadout} />
+              <span className="text-xs font-semibold text-text-2">Repos</span>
+              <RepoChips value={repos} onChange={setRepos} />
             </div>
 
             <div className="flex flex-col gap-2">
@@ -416,6 +394,10 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
               />
               <span className="text-xs text-faint">Activity is you using the app or a Claude turn running. Files are kept when it stops.</span>
             </div>
+
+            <p className="text-xs leading-relaxed text-faint">
+              New workspaces get every plugin, skill, agent, MCP server and instruction from your catalog. Trim them later in the workspace’s Loadout panel.
+            </p>
           </div>
 
           <div className="flex flex-col gap-5">
@@ -485,11 +467,13 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
         </div>
 
         {error && <p className="text-bad">{error}</p>}
-        <div className="-mx-6 flex flex-wrap items-center gap-3 border-t border-line px-6 pt-4">
-          <span className="flex flex-col text-[13px] text-muted">
-            <span className="font-mono text-text">
-              {type || "…"} · {market} · {region === "auto" ? `cheapest → ${landing ?? "none"}` : region} · {diskGb} GB · {repos.length + (repoDraft.trim() ? 1 : 0)} repos
-            </span>
+        <div className="-mx-6 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-line px-6 pt-4">
+          <span className="flex min-w-0 flex-1 flex-col text-[13px] text-muted">
+            {selected ? (
+              <span className="truncate font-mono text-text">
+                {selected.type} · {market} · {region === "auto" ? `cheapest → ${landing ?? "none"}` : region} · {diskGb} GB · {repos.length} {repos.length === 1 ? "repo" : "repos"}
+              </span>
+            ) : null}
             {cost && (
               <span className="text-xs">
                 ≈ {cost.spotKnown ? "" : "≤ "}
@@ -497,8 +481,9 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
                 {!cost.spotKnown && " · live spot price unavailable, showing on-demand"}
               </span>
             )}
+            {why && !busy && <span className={`text-xs ${name.trim() ? "text-warn" : "text-faint"}`}>{why}</span>}
           </span>
-          <Button type="button" variant="ghost" className="ml-auto" onClick={onClose}>
+          <Button type="button" variant="ghost" onClick={onClose}>
             Cancel
           </Button>
           <Button type="submit" variant="primary" disabled={!ready}>
@@ -511,15 +496,17 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
   );
 }
 
-function StatusRow({ ok, label, children }: { ok: boolean; label: string; children: ReactNode }) {
+const TONE_DOT = { ok: "ready", warn: "waiting", bad: "error" } as const;
+
+function StatusRow({ tone, label, children }: { tone: "ok" | "warn" | "bad"; label: string; children: ReactNode }) {
   return (
     <div className="flex gap-2.5 text-xs">
       <span className="pt-1">
-        <StateDot state={ok ? "ready" : "error"} />
+        <StateDot state={TONE_DOT[tone]} />
       </span>
       <div className="min-w-0 flex-1">
         <div className="font-semibold text-text-2">{label}</div>
-        <div className="break-words text-muted">{children}</div>
+        <div className={`min-w-0 ${tone === "warn" ? "text-warn" : "text-muted"}`}>{children}</div>
       </div>
     </div>
   );
@@ -532,6 +519,7 @@ function SettingsModal({ settings, onClose, onSaved }: { settings: Settings; onC
   const [coldDays, setColdDays] = useState(String(settings.coldAfterDays));
   const [error, setError] = useState("");
   const [phase, setPhase] = useState<"idle" | "saving" | "saved">("idle");
+  const [instructionsOpen, setInstructionsOpen] = useState(false);
   const { aws, ssmPlugin } = settings;
   const code = "rounded bg-panel-3 px-1 font-mono text-text-2";
 
@@ -552,36 +540,47 @@ function SettingsModal({ settings, onClose, onSaved }: { settings: Settings; onC
           </div>
           <span className="text-xs text-faint">
             A profile from <code className="font-mono">~/.aws/config</code>; SSO profiles work after <code className="font-mono">aws sso login</code>. Empty uses the default credential
-            chain.
-            Regions are where workspaces may run, picked by price; the first is home, where images are built and copied from. Empty uses us-east-1, us-east-2,
+            chain. Regions are where workspaces may run, picked by price; the first is home, where images are built and copied from. Empty uses us-east-1, us-east-2,
             us-west-2.
           </span>
         </div>
 
         <div className="flex flex-col gap-3 rounded-[10px] border border-line bg-panel-2 p-3">
-          <StatusRow ok={aws.ok} label="Credentials">
+          <StatusRow tone={aws.ok ? "ok" : "bad"} label="Credentials">
             {aws.ok ? (
-              <>
-                Account <span className="font-mono text-text-2">{aws.account}</span> · <span className="font-mono">{aws.arn}</span>
-              </>
+              <span className="flex min-w-0 gap-1.5">
+                <span className="shrink-0">
+                  Account <span className="font-mono text-text-2">{aws.account}</span> ·
+                </span>
+                <span className="truncate font-mono" title={aws.arn}>
+                  {aws.arn}
+                </span>
+              </span>
             ) : (
-              aws.error || "No credentials found."
+              <span className="break-words">{aws.error || "No credentials found."}</span>
             )}
           </StatusRow>
-          {aws.regions.map((r, i) => (
-            <StatusRow key={r.region} ok={r.ok} label={`Infra in ${r.region}${i === 0 ? " (home)" : ""}`}>
-              {r.ok ? (
-                "Deployed."
-              ) : (
-                <>
-                  Deploy <code className={code}>infra/</code> in {r.region} (see infra/README.md).
-                  {r.missing.length > 0 && <span className="mt-1 block font-mono text-[11px] text-faint">Missing: {r.missing.join(", ")}</span>}
-                  {r.error && <span className="mt-1 block text-faint">{r.error}</span>}
-                </>
-              )}
-            </StatusRow>
-          ))}
-          <StatusRow ok={ssmPlugin} label="session-manager-plugin">
+          {aws.regions.map((r, i) => {
+            const s = regionSummary(r);
+            const deploy = s.text.startsWith("Deploy infra/");
+            return (
+              <StatusRow key={r.region} tone={s.tone} label={`${r.region}${i === 0 ? " (home)" : ""}`}>
+                {deploy ? (
+                  <>
+                    Deploy <code className={code}>infra/</code> in {r.region} (see infra/README.md).
+                    <span className="mt-1 block truncate font-mono text-[11px] text-faint" title={r.missing.join("\n")}>
+                      Missing: {r.missing.join(", ")}
+                    </span>
+                  </>
+                ) : (
+                  <span className="break-words" title={s.tone === "warn" ? r.missing.join("\n") : undefined}>
+                    {s.text}
+                  </span>
+                )}
+              </StatusRow>
+            );
+          })}
+          <StatusRow tone={ssmPlugin ? "ok" : "bad"} label="session-manager-plugin">
             {ssmPlugin ? (
               "Installed. The app reaches instances over SSM, with no open ports."
             ) : (
@@ -603,6 +602,15 @@ function SettingsModal({ settings, onClose, onSaved }: { settings: Settings; onC
             volume). Starting it again takes a few extra minutes.
           </span>
         </div>
+
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <span className="text-[13px] font-semibold">Global instructions</span>
+          <Button size="sm" className="ml-auto" onClick={() => setInstructionsOpen(true)}>
+            Edit instructions
+          </Button>
+          <span className="w-full text-xs text-faint">Written to ~/.claude/CLAUDE.md in every workspace when a thread starts, above your personal CLAUDE.md.</span>
+        </div>
+        {instructionsOpen && <InstructionsEditor onClose={() => setInstructionsOpen(false)} />}
 
         <label className="flex flex-col gap-2">
           <span className="flex items-center gap-2 text-[13px] font-semibold">
