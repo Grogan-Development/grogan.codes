@@ -50,7 +50,7 @@ export interface Remote {
 
 // The Next server may be started with a minimal PATH (launchd, IDE), so look in the usual
 // Homebrew locations too. The same PATH is handed to `aws`, which spawns the plugin itself.
-const EXTRA_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/local/sessionmanagerplugin/bin"];
+const EXTRA_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/local/sessionmanagerplugin/bin", path.join(os.homedir(), ".local/bin")];
 
 function searchPath(): string {
   const dirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
