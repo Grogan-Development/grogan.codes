@@ -101,12 +101,18 @@ export function dollars(n: number) {
   return `$${n < 0.1 ? n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : n.toFixed(2)}`;
 }
 
-/** GET /api/machines. `spot` is best-effort and empty when the price lookup fails. */
+/** One region's infra: `missing` lists the stack's SSM parameters (including AMIs) that aren't there yet. */
+export type RegionStatus = { region: string; ok: boolean; missing: string[]; error?: string };
+
+/** GET /api/machines. `spot` and `offered` are best-effort and may be empty. */
 export type MachinesInfo = {
   machines: Machine[];
   defaultType: string;
   diskSteps: number[];
   defaultDiskGb: number;
-  region: string;
-  spot: Record<string, number>;
+  regions: RegionStatus[];
+  /** Regions where each type is offered in at least one AZ. */
+  offered: Record<string, string[]>;
+  /** Current lowest spot price, by region then type. */
+  spot: Record<string, Record<string, number>>;
 };

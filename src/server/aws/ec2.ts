@@ -18,7 +18,7 @@ import {
   type Tag,
 } from "@aws-sdk/client-ec2";
 import { SSMClient, GetParametersByPathCommand } from "@aws-sdk/client-ssm";
-import { awsGeneration, awsRegion, clientConfig, IMAGE_VARIANTS, PARAM_PREFIX, PARAMS, TAG_APP, TAG_WORKSPACE } from "./config";
+import { awsGeneration, awsRegion, awsRegions, clientConfig, IMAGE_VARIANTS, PARAM_PREFIX, PARAMS, TAG_APP, TAG_WORKSPACE, type ImageVariant } from "./config";
 import { sshPublicKey } from "./keys";
 import type { Machine, Market } from "./machines";
 
@@ -29,6 +29,7 @@ const g = globalThis as unknown as {
   __csSsm?: Map<string, SSMClient>;
   __csInfra?: Map<string, { at: number; params: Promise<Record<string, string>> }>;
   __csSpot?: Map<string, { at: number; prices: Promise<Record<string, number>> }>;
+  __csOffered?: Map<string, { at: number; types: Promise<Set<string>> }>;
 };
 
 function cached<T>(map: Map<string, T>, region: string, make: () => T): T {
@@ -78,23 +79,36 @@ function requiredParams(): string[] {
   ];
 }
 
-export async function infraStatus(): Promise<{ ok: boolean; missing: string[] }> {
-  const region = awsRegion();
+type Readiness = { ok: boolean; missing: string[]; /** variants with a launch template and a built AMI */ variants: Set<ImageVariant> };
+
+async function readiness(region: string): Promise<Readiness> {
   try {
     const p = await infraParams(region);
     const missing = requiredParams().filter((n) => !p[n]);
-    const amis = IMAGE_VARIANTS.map((v) => ({ name: PARAMS.amiId(v), id: p[PARAMS.amiId(v)] })).filter((a) => a.id);
-    const owned = await ownedAmis(amis.map((a) => a.id), region);
-    for (const a of amis) if (!owned.has(a.id)) missing.push(unbuilt(a.name));
-    return { ok: missing.length === 0, missing };
+    const amis = IMAGE_VARIANTS.map((v) => ({ v, name: PARAMS.amiId(v), id: p[PARAMS.amiId(v)] })).filter((a) => a.id);
+    const built = await ownedAmis(amis.map((a) => a.id), region);
+    for (const a of amis) if (!built.has(a.id)) missing.push(unbuilt(a.name));
+    const network = [PARAMS.subnetIds, PARAMS.securityGroupId].every((n) => p[n]);
+    const variants = new Set(amis.filter((a) => network && built.has(a.id) && p[PARAMS.launchTemplateId(a.v)]).map((a) => a.v));
+    return { ok: missing.length === 0, missing, variants };
   } catch {
-    return { ok: false, missing: requiredParams() };
+    return { ok: false, missing: requiredParams(), variants: new Set() };
   }
+}
+
+export async function infraStatus(region = awsRegion()): Promise<{ ok: boolean; missing: string[] }> {
+  const { ok, missing } = await readiness(region);
+  return { ok, missing };
+}
+
+/** infraStatus for every region in awsRegions(), home first. */
+export async function regionsStatus(): Promise<Array<{ region: string; ok: boolean; missing: string[] }>> {
+  return Promise.all(awsRegions().map(async (region) => ({ region, ...(await infraStatus(region)) })));
 }
 
 const unbuilt = (paramName: string) => `${paramName} (not built yet: run the Image Builder pipeline)`;
 
-const owned = new Set<string>(); // an AMI's owner never changes, so hits are cached for good
+const owned = new Set<string>(); // region:ami. An AMI's owner never changes, so hits are cached for good
 
 /**
  * Until Image Builder has run, the AMI params hold the stock parent image, which lacks the
@@ -105,13 +119,13 @@ async function ownedAmis(ids: string[], region: string): Promise<Set<string>> {
   const check = async (id: string) => {
     try {
       const res = await ec2(region).send(new DescribeImagesCommand({ ImageIds: [id], Owners: ["self"] }));
-      if (res.Images?.length) owned.add(id);
+      if (res.Images?.length) owned.add(`${region}:${id}`);
     } catch (err) {
       if (!/^InvalidAMIID/.test(code(err))) throw err; // a missing AMI just isn't ours
     }
   };
-  await Promise.all(ids.filter((id) => !owned.has(id)).map(check));
-  return new Set(ids.filter((id) => owned.has(id)));
+  await Promise.all(ids.filter((id) => !owned.has(`${region}:${id}`)).map(check));
+  return new Set(ids.filter((id) => owned.has(`${region}:${id}`)));
 }
 
 async function param(name: string, region: string): Promise<string> {
@@ -174,7 +188,7 @@ const rootDevices = new Map<string, { name: string; snapshotGb: number }>();
 
 /** The AMI's root device and its snapshot size: a root volume can't be smaller than the snapshot. */
 async function rootDevice(amiId: string, region: string): Promise<{ name: string; snapshotGb: number }> {
-  const hit = rootDevices.get(amiId);
+  const hit = rootDevices.get(`${region}:${amiId}`);
   if (hit) return hit;
   const res = await ec2(region).send(new DescribeImagesCommand({ ImageIds: [amiId] }));
   const img = res.Images?.[0];
@@ -182,7 +196,7 @@ async function rootDevice(amiId: string, region: string): Promise<{ name: string
   if (!name) throw new Error(`AMI ${amiId} not found in ${region}. Rebuild the image or redeploy the infra/ stack.`);
   const snapshotGb = img.BlockDeviceMappings?.find((b) => b.DeviceName === name)?.Ebs?.VolumeSize ?? 0;
   const dev = { name, snapshotGb };
-  rootDevices.set(amiId, dev);
+  rootDevices.set(`${region}:${amiId}`, dev);
   return dev;
 }
 
@@ -456,4 +470,75 @@ export async function spotPrices(types: string[], region = awsRegion()): Promise
   map.set(key, { at: Date.now(), prices });
   prices.catch(() => map.delete(key));
   return prices;
+}
+
+// ---- Choosing a region ------------------------------------------------------
+
+const OFFERED_TTL_MS = 60 * 60_000;
+
+/** The subset of `types` offered anywhere in the region, cached for an hour. */
+async function offeredIn(region: string, types: string[]): Promise<Set<string>> {
+  const map = (g.__csOffered ??= new Map());
+  const key = `${awsGeneration()}:${region}:${[...types].sort().join(",")}`;
+  const hit = map.get(key);
+  if (hit && Date.now() - hit.at < OFFERED_TTL_MS) return hit.types;
+  const offered = (async () => {
+    const out = new Set<string>();
+    let NextToken: string | undefined;
+    do {
+      const res = await ec2(region).send(
+        new DescribeInstanceTypeOfferingsCommand({ LocationType: "region", Filters: [{ Name: "instance-type", Values: types }], NextToken }),
+      );
+      for (const o of res.InstanceTypeOfferings ?? []) if (o.InstanceType) out.add(o.InstanceType);
+      NextToken = res.NextToken || undefined;
+    } while (NextToken);
+    return out;
+  })();
+  map.set(key, { at: Date.now(), types: offered });
+  offered.catch(() => map.delete(key));
+  return offered;
+}
+
+/** For each type, the regions in awsRegions() that offer it. A region whose lookup fails is left out. */
+export async function offeredRegions(types: string[]): Promise<Record<string, string[]>> {
+  const regions = awsRegions();
+  const sets = await Promise.all(regions.map((r) => offeredIn(r, types).catch(() => new Set<string>())));
+  return Object.fromEntries(types.map((t) => [t, regions.filter((_, i) => sets[i].has(t))]));
+}
+
+/** Spot placement score (1-10) per region for one instance of `type`, in a single call from the home region. */
+async function regionScores(type: string, regions: string[]): Promise<Record<string, number>> {
+  try {
+    const res = await ec2(awsRegion()).send(
+      new GetSpotPlacementScoresCommand({ InstanceTypes: [type], TargetCapacity: 1, SingleAvailabilityZone: false, RegionNames: regions }),
+    );
+    return Object.fromEntries((res.SpotPlacementScores ?? []).filter((s) => s.Region).map((s) => [s.Region!, s.Score ?? 0]));
+  } catch {
+    return {}; // advice only, and rate-limited
+  }
+}
+
+/**
+ * The region an "auto" workspace launches in. Candidates have the infra deployed, a built AMI for
+ * the machine's variant, and offer the type. Spot: cheapest current price, ties to the better
+ * placement score. On-demand costs the same everywhere: best placement score, ties to awsRegions() order.
+ */
+export async function resolveRegion(m: Machine, market: Market): Promise<string> {
+  const regions = awsRegions();
+  const [ready, offered] = await Promise.all([Promise.all(regions.map(readiness)), offeredRegions([m.type])]);
+  const why: string[] = [];
+  const candidates = regions.filter((r, i) => {
+    if (!ready[i].variants.has(m.variant)) why.push(`${r}: infra or ${m.variant} image not ready`);
+    else if (!offered[m.type].includes(r)) why.push(`${r}: ${m.type} not offered`);
+    else return true;
+    return false;
+  });
+  if (!candidates.length) throw new Error(`No region can run ${m.type} right now (${why.join("; ")}). Check Settings.`);
+  if (candidates.length === 1) return candidates[0];
+  const [scores, prices] = await Promise.all([
+    regionScores(m.type, candidates),
+    market === "spot" ? Promise.all(candidates.map((r) => spotPrices([m.type], r).then((p) => p[m.type], () => undefined))) : [],
+  ]);
+  const price = (r: string) => (market === "spot" ? (prices[candidates.indexOf(r)] ?? Infinity) : 0);
+  return [...candidates].sort((a, b) => price(a) - price(b) || (scores[b] ?? 0) - (scores[a] ?? 0) || regions.indexOf(a) - regions.indexOf(b))[0];
 }

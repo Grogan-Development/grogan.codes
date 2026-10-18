@@ -33,7 +33,8 @@ export type VariantSpec = {
  * - CPU: Canonical's Ubuntu 22.04 LTS (jammy) parameters. 22.04 is on EC2's hibernation-supported
  *   list; 24.04 isn't yet.
  * - GPU: "Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 22.04)" and its ARM64 sibling.
- *   Paths taken from the DLAMI developer guide pages for each AMI (checked 2026-10-18).
+ *   Paths taken from the DLAMI developer guide pages for each AMI.
+ * All four parameters resolved in us-east-1, us-east-2 and us-west-2 on 2026-10-18.
  */
 export const VARIANTS: Record<ImageVariant, VariantSpec> = {
   "cpu-x86": {

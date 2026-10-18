@@ -6,7 +6,8 @@ A local app (Next.js + SQLite) that runs your coding work on EC2. Each workspace
 
 - The app launches one instance per workspace with the AWS SDK. Its encrypted gp3 root volume is the workspace disk, so files survive stops, hibernation and spot interruptions.
 - Instances have no inbound ports. The app reaches them with SSH tunnelled through AWS Systems Manager (SSM) Session Manager: it runs `aws ssm start-session` and logs in as root with its own key in `.data/ssh/`.
-- The network, IAM role, launch templates and AMIs come from a CDK stack in [`infra/`](infra/README.md), deployed once per region. The app reads the stack's SSM parameters under `/codespace/`.
+- The network, launch templates and instance profile come from a CDK stack in [`infra/`](infra/README.md), deployed once in each region you use. The app reads the stack's SSM parameters under `/codespace/`.
+- Region is a price choice, not a location one. Settings lists the regions workspaces may run in (default `us-east-1, us-east-2, us-west-2`, AWS's base-price US regions, which all offer every type at the same on-demand price). The first is the **home region**: AMIs are built there by EC2 Image Builder and copied to the others, and the IAM policy is created by its stack.
 
 ## Run
 
@@ -25,10 +26,10 @@ pnpm build && pnpm start        # http://localhost:4100
    ```
 
 2. Set up an AWS profile, for example with `aws configure sso` (then `aws sso login`) or `aws configure`.
-3. Deploy `infra/` in the region you want to use. [infra/README.md](infra/README.md) has the steps. The first deploy also builds the AMIs, which takes a while.
+3. Deploy `infra/` in each region you want to use, home region first. [infra/README.md](infra/README.md) has the steps. The home region also builds the AMIs and copies them to the others, which takes a while.
 4. For GPU workspaces, raise your vCPU quotas: AWS console → Service Quotas → Amazon EC2 → "Running On-Demand G and VT instances" (and "All G and VT Spot Instance Requests" for spot; "Running On-Demand P instances" for `p5`). New accounts start at 0, and increases aren't approved instantly.
 5. Open the app. Settings asks for:
-   - **AWS profile and region**: an empty profile uses the default credential chain. Settings shows the account it found, whether the infra stack is deployed in that region, and whether `session-manager-plugin` is installed.
+   - **AWS profile and regions**: an empty profile uses the default credential chain, and empty regions use the defaults. Settings shows the account it found, whether the infra stack and images are ready in each region, and whether `session-manager-plugin` is installed.
    - **Claude token**: run `claude setup-token` and paste the result.
 
 Settings are stored in the macOS Keychain under the service `codespace` (the app's internal name). GitHub access comes from your local `gh auth token`.
@@ -36,6 +37,7 @@ Settings are stored in the macOS Keychain under the service `codespace` (the app
 ## Workspaces
 
 - Each workspace holds zero or more repos under `~/workspace` on its instance. You pick the instance type when you create it: Graviton (arm64) or x86 CPU types, or a GPU type, from fractions of an L4 up to an H100. The picker shows the on-demand price and, when AWS returns it, the live spot price.
+- **Region** defaults to **Cheapest**, resolved when you create the workspace: for spot, the ready region with the lowest current spot price for the type; for on-demand, where prices are equal, the region with the best capacity. The picker shows where Cheapest would land and the price there. You can also pick a region by name; regions without the infra stack, without a built image, or that don't offer the type are greyed out with the reason. The workspace stays in its region for life.
 - **Hibernate** saves memory to the disk and stops the instance, so running processes come back on start. Every CPU type supports it. GPU types can't hibernate, so for them Pause is a plain stop.
 - **Stop** keeps the disk and ends running processes. A stopped instance costs only its disk (gp3, about $0.08 per GB-month).
 - After the idle timeout the app stops the workspace. Activity means you using the app or a Claude turn running.

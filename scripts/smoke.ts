@@ -2,12 +2,12 @@
 // launch template, sets it up like a workspace, runs one Claude turn over SSH-over-SSM, checks
 // the terminal and desktop through local port forwards, then hibernates, starts and checks a
 // file survived. The instance is terminated (and its spot request cancelled) in `finally`.
-// Costs money. Usage: pnpm smoke   (SMOKE_SPOT=1 for spot, SMOKE_TYPE=m8g.large to override)
+// Costs money. Usage: pnpm smoke   (SMOKE_SPOT=1 for spot, SMOKE_TYPE=m8g.large, SMOKE_REGION=us-west-2)
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { awsRegion } from "../src/server/aws/config";
 import { machine, machineLabel } from "../src/server/aws/machines";
 import { launchInstance, startInstance, stopInstance, terminateInstance, waitForState, describeInstance } from "../src/server/aws/ec2";
-import { waitForRemote, forgetRemote, forwardPort, run, WORKSPACE_ROOT, VNC_PORT, TERMINAL_PORT } from "../src/server/remote";
+import { waitForRemote, forgetRemote, setInstanceRegion, forwardPort, run, WORKSPACE_ROOT, VNC_PORT, TERMINAL_PORT } from "../src/server/remote";
 import { bootstrap } from "../src/server/workspaces";
 import { spawnRemote } from "../src/server/transport";
 import { getSecret } from "../src/server/secrets";
@@ -15,6 +15,7 @@ import { getSecret } from "../src/server/secrets";
 const step = (s: string) => console.log(`\n▶ ${s}`);
 const secs = (t0: number) => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 let instanceId: string | null = null;
+const region = process.env.SMOKE_REGION || awsRegion();
 
 /** Opens a websocket and reports whether the handshake succeeded. */
 function wsOpens(url: string, protocol: string): Promise<string> {
@@ -29,7 +30,6 @@ function wsOpens(url: string, protocol: string): Promise<string> {
 async function main() {
   const token = getSecret("claude-oauth-token");
   if (!token) throw new Error("No Claude token in Keychain/env");
-  const region = awsRegion();
   const m = machine(process.env.SMOKE_TYPE || "t4g.medium");
   const market = process.env.SMOKE_SPOT === "1" ? "spot" : "on-demand";
 
@@ -37,6 +37,7 @@ async function main() {
   let t0 = Date.now();
   const l = await launchInstance({ workspaceId: `smoke-${Date.now().toString(36)}`, machine: m, market, diskGb: 30, region });
   instanceId = l.instanceId;
+  setInstanceRegion(l.instanceId, region);
   console.log(`  ${l.instanceId} in ${l.az}, ${l.volumeGb} GiB root, hibernate=${l.hibernate}`);
   await waitForState(l.instanceId, "running", { region });
   console.log(`  running after ${secs(t0)}`);
@@ -108,7 +109,7 @@ main()
     if (instanceId) {
       step(`terminate ${instanceId}`);
       forgetRemote(instanceId);
-      await terminateInstance(instanceId, awsRegion()).then(
+      await terminateInstance(instanceId, region).then(
         () => console.log("  terminated (spot request cancelled if any)"),
         (err) => console.error(`  ✗ terminate failed, clean up ${instanceId} by hand:`, err),
       );

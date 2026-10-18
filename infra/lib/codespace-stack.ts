@@ -16,7 +16,14 @@ import { Arch, BUILD_INSTANCE_TYPES, IMAGE_VARIANTS, ImageVariant, PARAM_PREFIX,
 export type CodespaceStackProps = StackProps & {
   /** Explicit AZ names. When omitted, CDK looks up the region's AZs (needs a concrete account). */
   availabilityZones?: string[];
-  /** Create the account-global IAM pieces: the CodespaceApp managed policy (and optional user). */
+  /**
+   * Home region only: the Image Builder pipelines. Their distributions copy each AMI to every
+   * region in `distributionRegions` and write /codespace/ami/<variant> there.
+   */
+  images: boolean;
+  /** Regions the pipelines distribute to (home first). Used only when `images` is true. */
+  distributionRegions: string[];
+  /** Home region only: the account-global IAM pieces (CodespaceApp policy, optional user). */
   createIam: boolean;
   /** Name of the managed policy. */
   policyName: string;
@@ -143,115 +150,125 @@ export class CodespaceStack extends Stack {
       },
     });
 
-    // ---- Image Builder ----------------------------------------------------------------------
-    const buildRole = new iam.Role(this, "ImageBuildInstanceRole", {
-      assumedBy: new iam.ServicePrincipal("ec2.amazonaws.com"),
-      description: "Codespace Image Builder build instances",
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName("AmazonSSMManagedInstanceCore"),
-        iam.ManagedPolicy.fromAwsManagedPolicyName("EC2InstanceProfileForImageBuilder"),
-      ],
-    });
-    const buildProfile = new iam.InstanceProfile(this, "ImageBuildInstanceProfile", { role: buildRole });
-
-    // The service-linked role may only write parameters under /imagebuilder/, so the pipelines run
-    // with an execution role that may also write /codespace/ami/*.
-    const executionRole = new iam.Role(this, "ImageBuilderExecutionRole", {
-      assumedBy: new iam.ServicePrincipal("imagebuilder.amazonaws.com"),
-      description: "Codespace Image Builder pipelines (build + distribute to /codespace/ami/*)",
-      managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName("EC2ImageBuilderExecutionPolicy")],
-    });
-    executionRole.addToPolicy(
-      new iam.PolicyStatement({ actions: ["ssm:GetParameter", "ssm:PutParameter"], resources: IMAGE_VARIANTS.map(amiParamArn) }),
-    );
-
-    const setupScript = new Asset(this, "SetupScript", { path: path.join(__dirname, "..", "image", "setup.sh") });
-    setupScript.grantRead(buildRole);
-
-    const componentDoc = [
-      "name: codespace-setup",
-      "description: Installs and configures everything a Codespace workspace needs (infra/image/setup.sh).",
-      "schemaVersion: 1.0",
-      "parameters:",
-      "  - Variant:",
-      "      type: string",
-      "      default: cpu-x86",
-      "      description: Image variant (cpu-arm64, cpu-x86, gpu-arm64, gpu-x86).",
-      "phases:",
-      "  - name: build",
-      "    steps:",
-      "      - name: Download",
-      "        action: S3Download",
-      "        inputs:",
-      `          - source: s3://${setupScript.s3BucketName}/${setupScript.s3ObjectKey}`,
-      "            destination: /var/tmp/codespace-setup.sh",
-      "      - name: Setup",
-      "        action: ExecuteBash",
-      "        timeoutSeconds: 5400",
-      "        inputs:",
-      "          commands:",
-      "            - CODESPACE_VARIANT='{{ Variant }}' bash /var/tmp/codespace-setup.sh",
-      "",
-    ].join("\n");
-    // Components and recipes are immutable per name+version, so content changes get a new name.
-    const componentName = `codespace-setup-${short(setupScript.assetHash + COMPONENT_DOC_REVISION)}`;
-    const component = new imagebuilder.CfnComponent(this, "SetupComponent", {
-      name: componentName,
-      version: "1.0.0",
-      platform: "Linux",
-      description: "Codespace workspace setup (infra/image/setup.sh)",
-      changeDescription: `setup.sh ${setupScript.assetHash.slice(0, 12)}`,
-      data: componentDoc,
-      tags: { app: TAG_APP.Value },
-    });
-
     const subnetIds = vpc.publicSubnets.map((s) => s.subnetId);
-    const infraConfigs = {} as Record<Arch, imagebuilder.CfnInfrastructureConfiguration>;
-    for (const arch of ["x86_64", "arm64"] as Arch[]) {
-      infraConfigs[arch] = new imagebuilder.CfnInfrastructureConfiguration(this, `BuildInfra-${arch}`, {
-        name: `codespace-build-${arch}`,
-        description: `Codespace image builds (${arch})`,
-        instanceTypes: BUILD_INSTANCE_TYPES[arch],
-        instanceProfileName: buildProfile.instanceProfileName,
-        subnetId: subnetIds[0],
-        securityGroupIds: [sg.securityGroupId],
-        terminateInstanceOnFailure: true,
-        instanceMetadataOptions: { httpTokens: "required", httpPutResponseHopLimit: 2 },
-        resourceTags: { "codespace-build": "true" },
+
+    if (props.images) {
+      const regions = [this.region, ...props.distributionRegions.filter((r) => r !== this.region)];
+      // ---- Image Builder ----------------------------------------------------------------------
+      const buildRole = new iam.Role(this, "ImageBuildInstanceRole", {
+        assumedBy: new iam.ServicePrincipal("ec2.amazonaws.com"),
+        description: "Codespace Image Builder build instances",
+        managedPolicies: [
+          iam.ManagedPolicy.fromAwsManagedPolicyName("AmazonSSMManagedInstanceCore"),
+          iam.ManagedPolicy.fromAwsManagedPolicyName("EC2InstanceProfileForImageBuilder"),
+        ],
+      });
+      const buildProfile = new iam.InstanceProfile(this, "ImageBuildInstanceProfile", { role: buildRole });
+
+      // The service-linked role may only write parameters under /imagebuilder/, so the pipelines run
+      // with an execution role that may also write /codespace/ami/*.
+      const executionRole = new iam.Role(this, "ImageBuilderExecutionRole", {
+        assumedBy: new iam.ServicePrincipal("imagebuilder.amazonaws.com"),
+        description: "Codespace Image Builder pipelines (build + distribute to /codespace/ami/*)",
+        managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName("EC2ImageBuilderExecutionPolicy")],
+      });
+      // Distribution writes /codespace/ami/<variant> in every target region. Cross-region AMI copies
+      // in the same account need nothing beyond EC2ImageBuilderExecutionPolicy (ec2:CopyImage, KMS
+      // via EC2 for the aws/ebs-encrypted snapshots); only the SSM writes need adding.
+      executionRole.addToPolicy(
+        new iam.PolicyStatement({
+          actions: ["ssm:GetParameter", "ssm:PutParameter"],
+          resources: regions.flatMap((region) =>
+            IMAGE_VARIANTS.map((v) => this.formatArn({ service: "ssm", region, resource: "parameter", resourceName: PARAMS.amiId(v).slice(1) })),
+          ),
+        }),
+      );
+
+      const setupScript = new Asset(this, "SetupScript", { path: path.join(__dirname, "..", "image", "setup.sh") });
+      setupScript.grantRead(buildRole);
+
+      const componentDoc = [
+        "name: codespace-setup",
+        "description: Installs and configures everything a Codespace workspace needs (infra/image/setup.sh).",
+        "schemaVersion: 1.0",
+        "parameters:",
+        "  - Variant:",
+        "      type: string",
+        "      default: cpu-x86",
+        "      description: Image variant (cpu-arm64, cpu-x86, gpu-arm64, gpu-x86).",
+        "phases:",
+        "  - name: build",
+        "    steps:",
+        "      - name: Download",
+        "        action: S3Download",
+        "        inputs:",
+        `          - source: s3://${setupScript.s3BucketName}/${setupScript.s3ObjectKey}`,
+        "            destination: /var/tmp/codespace-setup.sh",
+        "      - name: Setup",
+        "        action: ExecuteBash",
+        "        timeoutSeconds: 5400",
+        "        inputs:",
+        "          commands:",
+        "            - CODESPACE_VARIANT='{{ Variant }}' bash /var/tmp/codespace-setup.sh",
+        "",
+      ].join("\n");
+      // Components and recipes are immutable per name+version, so content changes get a new name.
+      const componentName = `codespace-setup-${short(setupScript.assetHash + COMPONENT_DOC_REVISION)}`;
+      const component = new imagebuilder.CfnComponent(this, "SetupComponent", {
+        name: componentName,
+        version: "1.0.0",
+        platform: "Linux",
+        description: "Codespace workspace setup (infra/image/setup.sh)",
+        changeDescription: `setup.sh ${setupScript.assetHash.slice(0, 12)}`,
+        data: componentDoc,
         tags: { app: TAG_APP.Value },
       });
-    }
 
-    const pipelines: Record<string, imagebuilder.CfnImagePipeline> = {};
-    for (const v of IMAGE_VARIANTS) {
-      const spec = VARIANTS[v];
-      const parentImage = `ssm:${spec.parentParam}`;
-      const blockDeviceMappings: imagebuilder.CfnImageRecipe.InstanceBlockDeviceMappingProperty[] = [
-        {
-          deviceName: ROOT_DEVICE,
-          // The DLAMI keeps its own (larger) root size; the CPU images stay small.
-          ebs: { volumeType: "gp3", encrypted: true, deleteOnTermination: true, ...(spec.gpu ? {} : { volumeSize: CPU_IMAGE_ROOT_GB }) },
-        },
-      ];
-      const recipeName = `codespace-${v}-${short(JSON.stringify({ parentImage, componentName, blockDeviceMappings }))}`;
-      const recipe = new imagebuilder.CfnImageRecipe(this, `Recipe-${v}`, {
-        name: recipeName,
-        version: "1.0.0",
-        description: `Codespace ${v} workspace image`,
-        parentImage,
-        components: [{ componentArn: component.attrArn, parameters: [{ name: "Variant", value: [v] }] }],
-        blockDeviceMappings,
-        workingDirectory: "/var/tmp",
-        additionalInstanceConfiguration: { systemsManagerAgent: { uninstallAfterBuild: false } },
-        tags: { app: TAG_APP.Value, variant: v },
-      });
+      const infraConfigs = {} as Record<Arch, imagebuilder.CfnInfrastructureConfiguration>;
+      for (const arch of ["x86_64", "arm64"] as Arch[]) {
+        infraConfigs[arch] = new imagebuilder.CfnInfrastructureConfiguration(this, `BuildInfra-${arch}`, {
+          name: `codespace-build-${arch}`,
+          description: `Codespace image builds (${arch})`,
+          instanceTypes: BUILD_INSTANCE_TYPES[arch],
+          instanceProfileName: buildProfile.instanceProfileName,
+          subnetId: subnetIds[0],
+          securityGroupIds: [sg.securityGroupId],
+          terminateInstanceOnFailure: true,
+          instanceMetadataOptions: { httpTokens: "required", httpPutResponseHopLimit: 2 },
+          resourceTags: { "codespace-build": "true" },
+          tags: { app: TAG_APP.Value },
+        });
+      }
 
-      const distribution = new imagebuilder.CfnDistributionConfiguration(this, `Distribution-${v}`, {
-        name: `codespace-${v}`,
-        description: `Codespace ${v}: AMI in this region, ID written to ${PARAMS.amiId(v)}`,
-        distributions: [
+      const pipelines: Record<string, imagebuilder.CfnImagePipeline> = {};
+      for (const v of IMAGE_VARIANTS) {
+        const spec = VARIANTS[v];
+        const parentImage = `ssm:${spec.parentParam}`;
+        const blockDeviceMappings: imagebuilder.CfnImageRecipe.InstanceBlockDeviceMappingProperty[] = [
           {
-            region: this.region,
+            deviceName: ROOT_DEVICE,
+            // The DLAMI keeps its own (larger) root size; the CPU images stay small.
+            ebs: { volumeType: "gp3", encrypted: true, deleteOnTermination: true, ...(spec.gpu ? {} : { volumeSize: CPU_IMAGE_ROOT_GB }) },
+          },
+        ];
+        const recipeName = `codespace-${v}-${short(JSON.stringify({ parentImage, componentName, blockDeviceMappings }))}`;
+        const recipe = new imagebuilder.CfnImageRecipe(this, `Recipe-${v}`, {
+          name: recipeName,
+          version: "1.0.0",
+          description: `Codespace ${v} workspace image`,
+          parentImage,
+          components: [{ componentArn: component.attrArn, parameters: [{ name: "Variant", value: [v] }] }],
+          blockDeviceMappings,
+          workingDirectory: "/var/tmp",
+          additionalInstanceConfiguration: { systemsManagerAgent: { uninstallAfterBuild: false } },
+          tags: { app: TAG_APP.Value, variant: v },
+        });
+
+        const distribution = new imagebuilder.CfnDistributionConfiguration(this, `Distribution-${v}`, {
+          name: `codespace-${v}`,
+          description: `Codespace ${v}: AMI copied to ${regions.join(", ")}, ID written to ${PARAMS.amiId(v)} in each`,
+          distributions: regions.map((region) => ({
+            region,
             // Untyped JSON in the L1, so CloudFormation's PascalCase keys.
             amiDistributionConfiguration: {
               Name: `codespace-${v}-{{ imagebuilder:buildDate }}`,
@@ -259,29 +276,35 @@ export class CodespaceStack extends Stack {
               AmiTags: { [TAG_APP.Key]: TAG_APP.Value, variant: v },
             },
             ssmParameterConfigurations: [{ parameterName: PARAMS.amiId(v), dataType: "aws:ec2:image" }],
-          },
-        ],
-        tags: { app: TAG_APP.Value },
-      });
-      // Image Builder checks an existing parameter's type when the distribution is created.
-      distribution.node.addDependency(amiSeed);
+          })),
+          tags: { app: TAG_APP.Value },
+        });
+        // Image Builder checks an existing parameter's type when the distribution is created. The
+        // other regions' parameters are seeded by their own stacks with the same type.
+        distribution.node.addDependency(amiSeed);
 
-      pipelines[v] = new imagebuilder.CfnImagePipeline(this, `Pipeline-${v}`, {
-        name: `codespace-${v}`,
-        description: `Codespace ${v} workspace image (${spec.arch}${spec.gpu ? ", NVIDIA" : ""})`,
-        imageRecipeArn: recipe.attrArn,
-        infrastructureConfigurationArn: infraConfigs[spec.arch].attrArn,
-        distributionConfigurationArn: distribution.attrArn,
-        executionRole: executionRole.roleArn,
-        imageTestsConfiguration: { imageTestsEnabled: false, timeoutMinutes: 60 },
-        enhancedImageMetadataEnabled: true,
-        status: "ENABLED",
-        ...(props.imageSchedule === "weekly"
-          ? { schedule: { scheduleExpression: "cron(0 9 ? * mon *)", pipelineExecutionStartCondition: "EXPRESSION_MATCH_ONLY" } }
-          : {}),
-        tags: { app: TAG_APP.Value, variant: v },
+        pipelines[v] = new imagebuilder.CfnImagePipeline(this, `Pipeline-${v}`, {
+          name: `codespace-${v}`,
+          description: `Codespace ${v} workspace image (${spec.arch}${spec.gpu ? ", NVIDIA" : ""})`,
+          imageRecipeArn: recipe.attrArn,
+          infrastructureConfigurationArn: infraConfigs[spec.arch].attrArn,
+          distributionConfigurationArn: distribution.attrArn,
+          executionRole: executionRole.roleArn,
+          imageTestsConfiguration: { imageTestsEnabled: false, timeoutMinutes: 60 },
+          enhancedImageMetadataEnabled: true,
+          status: "ENABLED",
+          ...(props.imageSchedule === "weekly"
+            ? { schedule: { scheduleExpression: "cron(0 9 ? * mon *)", pipelineExecutionStartCondition: "EXPRESSION_MATCH_ONLY" } }
+            : {}),
+          tags: { app: TAG_APP.Value, variant: v },
+        });
+        pipelines[v].node.addDependency(executionRole);
+      }
+
+      new CfnOutput(this, "PipelineArns", {
+        value: IMAGE_VARIANTS.map((v) => pipelines[v].attrArn).join(","),
+        description: "Run each once after the first deploy (see infra/README.md)",
       });
-      pipelines[v].node.addDependency(executionRole);
     }
 
     // ---- Launch templates -------------------------------------------------------------------
@@ -372,10 +395,6 @@ export class CodespaceStack extends Stack {
       });
     }
 
-    new CfnOutput(this, "PipelineArns", {
-      value: IMAGE_VARIANTS.map((v) => pipelines[v].attrArn).join(","),
-      description: "Run each once after the first deploy (see infra/README.md)",
-    });
     new CfnOutput(this, "ParamPrefix", { value: PARAM_PREFIX });
   }
 

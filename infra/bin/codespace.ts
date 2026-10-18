@@ -3,11 +3,14 @@ import { App } from "aws-cdk-lib";
 import { CodespaceStack } from "../lib/codespace-stack";
 
 /**
+ * One CodespaceStack per region, named Codespace-<region>. The first region is home: only its
+ * stack has the Image Builder pipelines (which distribute to every region) and the account-global
+ * IAM policy/user and budget. `cdk deploy --all` deploys them all.
+ *
  * Context (pass with `-c key=value`):
- *   region            target region (default: CDK_DEFAULT_REGION, else us-east-1)
+ *   regions           comma-separated, home first (default us-east-1,us-east-2,us-west-2)
  *   account           target account (default: CDK_DEFAULT_ACCOUNT from your credentials)
- *   azs               comma-separated AZ names; skips the AZ lookup (default: every AZ, max 6)
- *   iam               "false" to skip the account-global CodespaceApp policy (2nd+ region)
+ *   azs.<region>      comma-separated AZ names for that region; skips its AZ lookup
  *   policyName        managed policy name (default CodespaceApp)
  *   appUser           "true" to create IAM user codespace-app with the policy (no keys)
  *   ebsEncryption     "false" to leave the account's EBS-encryption-by-default setting alone
@@ -15,6 +18,8 @@ import { CodespaceStack } from "../lib/codespace-stack";
  *   budgetEmail       turn on a monthly cost budget alert to this address
  *   budgetUsd         budget amount (default 100)
  */
+const DEFAULT_REGIONS = ["us-east-1", "us-east-2", "us-west-2"];
+
 const app = new App();
 const ctx = (key: string): string | undefined => {
   const v = app.node.tryGetContext(key);
@@ -24,21 +29,31 @@ const flag = (key: string, fallback: boolean) => {
   const v = ctx(key);
   return v === undefined ? fallback : v === "true" || v === "1";
 };
+const list = (v: string | undefined) => (v ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const region = ctx("region") ?? process.env.CDK_DEFAULT_REGION ?? "us-east-1";
+const regions = [...new Set(list(ctx("regions")))];
+if (!regions.length) regions.push(...DEFAULT_REGIONS);
+for (const r of regions) if (!/^[a-z]{2}(-[a-z]+)+-\d$/.test(r)) throw new Error(`Not a region name: ${r}`);
+const [home] = regions;
+
 const account = ctx("account") ?? process.env.CDK_DEFAULT_ACCOUNT;
 const schedule = ctx("imageSchedule") ?? "manual";
 if (schedule !== "manual" && schedule !== "weekly") throw new Error(`imageSchedule must be manual or weekly, got ${schedule}`);
 const budgetEmail = ctx("budgetEmail");
 
-new CodespaceStack(app, "CodespaceStack", {
-  env: { region, account },
-  description: "Codespace: network, IAM, Image Builder pipelines and launch templates for EC2 workspaces",
-  availabilityZones: ctx("azs")?.split(",").map((s) => s.trim()).filter(Boolean),
-  createIam: flag("iam", true),
-  policyName: ctx("policyName") ?? "CodespaceApp",
-  createAppUser: flag("appUser", false),
-  enableEbsEncryptionByDefault: flag("ebsEncryption", true),
-  imageSchedule: schedule,
-  budget: budgetEmail ? { email: budgetEmail, usd: Number(ctx("budgetUsd") ?? 100) } : undefined,
-});
+for (const region of regions) {
+  const isHome = region === home;
+  new CodespaceStack(app, `Codespace-${region}`, {
+    env: { region, account },
+    description: `Codespace ${isHome ? "home region" : "region"} ${region}: network, launch templates${isHome ? ", Image Builder pipelines, IAM" : ""}`,
+    availabilityZones: list(ctx(`azs.${region}`)),
+    images: isHome,
+    distributionRegions: regions,
+    createIam: isHome,
+    policyName: ctx("policyName") ?? "CodespaceApp",
+    createAppUser: isHome && flag("appUser", false),
+    enableEbsEncryptionByDefault: flag("ebsEncryption", true),
+    imageSchedule: schedule,
+    budget: isHome && budgetEmail ? { email: budgetEmail, usd: Number(ctx("budgetUsd") ?? 100) } : undefined,
+  });
+}

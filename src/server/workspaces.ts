@@ -1,7 +1,7 @@
 import { nanoid } from "nanoid";
 import { db, now } from "./db";
 import { remote, waitForRemote, forgetRemote, forwardPort, setInstanceRegion, run, mustRun, q, WORKSPACE_ROOT, HOME, TERMINAL_PORT, VNC_PORT, type Remote } from "./remote";
-import { awsRegion } from "./aws/config";
+import { awsRegion, awsRegions } from "./aws/config";
 import { machine, MARKETS, DISK_GB_STEPS, type Machine, type Market } from "./aws/machines";
 import {
   launchInstance,
@@ -14,6 +14,7 @@ import {
   NOT_FOUND_GRACE_MS,
   spotInterrupted,
   rootVolumeGb,
+  resolveRegion,
   type InstanceInfo,
 } from "./aws/ec2";
 import { githubToken, gitIdentity } from "./secrets";
@@ -123,19 +124,26 @@ function assertRepoName(name: string, input = name) {
   if (!/^[\w.-]+$/.test(name) || /^\.+$/.test(name)) throw new Error(`Can't use "${input}" as a repo: "${name}" isn't a valid folder name`);
 }
 
-export function createWorkspace(input: {
+export async function createWorkspace(input: {
   name: string;
   instanceType: string;
   market: Market;
+  /** "auto" picks by price at create time; the row always stores a concrete region. */
+  region: string;
   diskGb: number;
   idleMinutes: number;
   repos: string[];
   loadout: string[];
 }) {
   const repos = input.repos.filter(Boolean).map(parseRepo); // validate before creating anything
-  machine(input.instanceType);
+  const m = machine(input.instanceType);
   if (!MARKETS.includes(input.market)) throw new Error(`Market must be one of ${MARKETS.join(", ")}`);
   if (!DISK_GB_STEPS.includes(input.diskGb)) throw new Error(`Disk must be one of ${DISK_GB_STEPS.join(", ")} GB`);
+  if (input.region !== "auto" && !awsRegions().includes(input.region)) {
+    throw new Error(`Region must be "auto" or one of ${awsRegions().join(", ")}`);
+  }
+  if (db().prepare("SELECT 1 FROM workspaces WHERE name = ?").get(input.name)) throw new Error(`A workspace named "${input.name}" already exists`);
+  const region = input.region === "auto" ? await resolveRegion(m, input.market) : input.region;
   const id = nanoid(10);
   const t = now();
   db()
@@ -143,7 +151,7 @@ export function createWorkspace(input: {
       `INSERT INTO workspaces (id, name, state, snapshot, instance_type, market, region, disk_gb, idle_minutes, loadout, created_at, last_activity_at)
        VALUES (?, ?, 'creating', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(id, input.name, input.instanceType, input.instanceType, input.market, awsRegion(), input.diskGb, input.idleMinutes, JSON.stringify(input.loadout), t, t);
+    .run(id, input.name, input.instanceType, input.instanceType, input.market, region, input.diskGb, input.idleMinutes, JSON.stringify(input.loadout), t, t);
   for (const { url, name } of repos) {
     db().prepare("INSERT INTO repos (id, workspace_id, name, url, state) VALUES (?, ?, ?, ?, 'pending')").run(nanoid(10), id, name, url);
   }

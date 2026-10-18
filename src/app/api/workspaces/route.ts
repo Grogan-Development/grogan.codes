@@ -34,6 +34,7 @@ export const POST = handle(async (req: Request) => {
     name: string;
     instanceType?: string;
     market?: Market;
+    region?: string;
     diskGb?: number;
     idleMinutes?: number;
     repos?: string[];
@@ -43,10 +44,11 @@ export const POST = handle(async (req: Request) => {
   if (!name) return json({ error: "Name is required" }, 400);
   return json(
     workspaceJson(
-      createWorkspace({
+      await createWorkspace({
         name,
         instanceType: body.instanceType ?? DEFAULT_MACHINE,
         market: body.market ?? "on-demand",
+        region: body.region || "auto",
         diskGb: body.diskGb ?? DEFAULT_DISK_GB,
         idleMinutes: body.idleMinutes ?? 30,
         repos: body.repos ?? [],

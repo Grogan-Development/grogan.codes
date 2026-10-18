@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { AwsStatus } from "@/server/aws/config";
-import { api, diskUse, dollars, gpuShare, machineLabel, timeAgo, type MachinesInfo, type Market, type Thread, type Workspace } from "@/lib/api";
-import { estimate, InstancePicker } from "./InstancePicker";
+import { api, diskUse, dollars, gpuShare, machineLabel, timeAgo, type MachinesInfo, type Market, type RegionStatus, type Thread, type Workspace } from "@/lib/api";
+import { bestSpot, estimate, InstancePicker, RegionPicker, regionBlocker, resolveCheapest } from "./InstancePicker";
 import { ThreadSquares } from "./ThreadSquares";
 import type { PermissionEvent } from "./composer/model";
 import { Button, Icon, Input, Logo, MarketTag, Modal, Segmented, StateDot } from "./ui";
@@ -12,14 +12,14 @@ import { LoadoutPicker } from "./LoadoutPicker";
 import { DeleteWorkspace } from "./DeleteFlow";
 
 type Settings = {
-  aws: AwsStatus & { infra: { ok: boolean; missing: string[]; error?: string } };
+  aws: AwsStatus & { regions: RegionStatus[] };
   claude: boolean;
   github: boolean;
   ssmPlugin: boolean;
 };
 
-/** AWS is usable only with working credentials, the infra stack in the region, and the SSM plugin. */
-const awsReady = (s: Settings) => s.aws.ok && s.aws.infra.ok && s.ssmPlugin;
+/** AWS is usable with working credentials, the SSM plugin, and the infra stack in at least one region. */
+const awsReady = (s: Settings) => s.aws.ok && s.aws.regions.some((r) => r.ok) && s.ssmPlugin;
 type Attention = { thread: Thread & { workspace_name: string }; pending: PermissionEvent[] };
 
 export function Dashboard() {
@@ -287,6 +287,7 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
   const [infoError, setInfoError] = useState("");
   const [type, setType] = useState("");
   const [market, setMarket] = useState<Market>("on-demand");
+  const [region, setRegion] = useState("auto");
   const [diskGb, setDiskGb] = useState(0);
   const [idle, setIdle] = useState(30);
   const [loadout, setLoadout] = useState<string[]>([]);
@@ -304,8 +305,13 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
   }, []);
 
   const selected = info?.machines.find((m) => m.type === type);
-  const cost = selected && info ? estimate(selected, market, diskGb, info.spot) : null;
-  const ready = !!name.trim() && !!selected && !busy;
+  // The region the workspace would land in, as far as the client can tell.
+  const landing = selected && info ? (region === "auto" ? resolveCheapest(info, selected, market) : region) : null;
+  const named = info?.regions.find((r) => r.region === region);
+  const blocker = selected && info && named ? regionBlocker(named, selected, info.offered) : null;
+  const cost = selected && info ? estimate(selected, market, diskGb, landing ? info.spot[landing]?.[selected.type] : undefined) : null;
+  const best = selected && info ? bestSpot(info, selected) : null;
+  const ready = !!name.trim() && !!selected && !!landing && !blocker && !busy;
 
   const addRepo = () => {
     const r = repoDraft.trim().replace(/,$/, "");
@@ -320,7 +326,7 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
       const all = repoDraft.trim() ? [...repos, repoDraft.trim()] : repos;
       await api("/api/workspaces", {
         method: "POST",
-        json: { name, instanceType: type, market, diskGb, idleMinutes: idle, repos: all, loadout },
+        json: { name, instanceType: type, market, region, diskGb, idleMinutes: idle, repos: all, loadout },
       });
       onCreated();
     } catch (e) {
@@ -425,8 +431,7 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
                   { value: "on-demand", label: "On-demand" },
                   {
                     value: "spot",
-                    label:
-                      selected && info?.spot[selected.type] ? `Spot · −${Math.max(0, Math.round((1 - info.spot[selected.type] / selected.onDemandHr) * 100))}%` : "Spot",
+                    label: selected && best ? `Spot · −${Math.max(0, Math.round((1 - best.price / selected.onDemandHr) * 100))}%` : "Spot",
                   },
                 ]}
               />
@@ -439,6 +444,17 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
                 <span className="text-xs text-faint">Full price. Runs until you or the idle timeout stop it.</span>
               )}
             </div>
+
+            {info && selected && (
+              <>
+                <RegionPicker info={info} m={selected} market={market} value={region} onChange={setRegion} />
+                {blocker && (
+                  <span className="text-xs text-bad">
+                    {region} can’t run {selected.type}: {blocker}.
+                  </span>
+                )}
+              </>
+            )}
 
             {info && (
               <div className="flex flex-col gap-2">
@@ -464,14 +480,13 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
         <div className="-mx-6 flex flex-wrap items-center gap-3 border-t border-line px-6 pt-4">
           <span className="flex flex-col text-[13px] text-muted">
             <span className="font-mono text-text">
-              {type || "…"} · {market} · {diskGb} GB · {repos.length + (repoDraft.trim() ? 1 : 0)} repos
+              {type || "…"} · {market} · {region === "auto" ? `cheapest → ${landing ?? "none"}` : region} · {diskGb} GB · {repos.length + (repoDraft.trim() ? 1 : 0)} repos
             </span>
-            {cost && info && (
+            {cost && (
               <span className="text-xs">
                 ≈ {cost.spotKnown ? "" : "≤ "}
                 {dollars(cost.totalHr)}/hr running · disk ≈ {dollars(cost.diskMonth)}/mo, also while stopped
                 {!cost.spotKnown && " · live spot price unavailable, showing on-demand"}
-                {info.region !== "us-east-1" && " · on-demand prices are us-east-1"}
               </span>
             )}
           </span>
@@ -504,7 +519,7 @@ function StatusRow({ ok, label, children }: { ok: boolean; label: string; childr
 
 function SettingsModal({ settings, onClose, onSaved }: { settings: Settings; onClose: () => void; onSaved: () => Promise<unknown> }) {
   const [profile, setProfile] = useState(settings.aws.profile ?? "");
-  const [region, setRegion] = useState(settings.aws.region);
+  const [regions, setRegions] = useState(settings.aws.regions.map((r) => r.region).join(", "));
   const [claudeToken, setClaudeToken] = useState("");
   const [error, setError] = useState("");
   const [phase, setPhase] = useState<"idle" | "saving" | "saved">("idle");
@@ -516,19 +531,21 @@ function SettingsModal({ settings, onClose, onSaved }: { settings: Settings; onC
       <div className="flex flex-col gap-5">
         <div className="flex flex-col gap-2">
           <span className="text-[13px] font-semibold">AWS</span>
-          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2">
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)] gap-2">
             <label className="flex flex-col gap-1">
               <span className="text-xs text-muted">Profile</span>
               <Input value={profile} onChange={(e) => setProfile(e.target.value)} placeholder="default chain" className="w-full font-mono" />
             </label>
             <label className="flex flex-col gap-1">
-              <span className="text-xs text-muted">Region</span>
-              <Input value={region} onChange={(e) => setRegion(e.target.value)} placeholder="us-east-1" className="w-full font-mono" />
+              <span className="text-xs text-muted">Regions</span>
+              <Input value={regions} onChange={(e) => setRegions(e.target.value)} placeholder="us-east-1, us-east-2, us-west-2" className="w-full font-mono" />
             </label>
           </div>
           <span className="text-xs text-faint">
             A profile from <code className="font-mono">~/.aws/config</code>; SSO profiles work after <code className="font-mono">aws sso login</code>. Empty uses the default credential
             chain.
+            Regions are where workspaces may run, picked by price; the first is home, where images are built and copied from. Empty uses us-east-1, us-east-2,
+            us-west-2.
           </span>
         </div>
 
@@ -542,19 +559,19 @@ function SettingsModal({ settings, onClose, onSaved }: { settings: Settings; onC
               aws.error || "No credentials found."
             )}
           </StatusRow>
-          <StatusRow ok={aws.infra.ok} label={`Infra stack in ${aws.region}`}>
-            {aws.infra.ok ? (
-              "Deployed."
-            ) : (
-              <>
-                Deploy <code className={code}>infra/</code> in {aws.region} (see infra/README.md).
-                {aws.infra.missing.length > 0 && (
-                  <span className="mt-1 block font-mono text-[11px] text-faint">Missing: {aws.infra.missing.join(", ")}</span>
-                )}
-                {aws.infra.error && <span className="mt-1 block text-faint">{aws.infra.error}</span>}
-              </>
-            )}
-          </StatusRow>
+          {aws.regions.map((r, i) => (
+            <StatusRow key={r.region} ok={r.ok} label={`Infra in ${r.region}${i === 0 ? " (home)" : ""}`}>
+              {r.ok ? (
+                "Deployed."
+              ) : (
+                <>
+                  Deploy <code className={code}>infra/</code> in {r.region} (see infra/README.md).
+                  {r.missing.length > 0 && <span className="mt-1 block font-mono text-[11px] text-faint">Missing: {r.missing.join(", ")}</span>}
+                  {r.error && <span className="mt-1 block text-faint">{r.error}</span>}
+                </>
+              )}
+            </StatusRow>
+          ))}
           <StatusRow ok={ssmPlugin} label="session-manager-plugin">
             {ssmPlugin ? (
               "Installed. The app reaches instances over SSM, with no open ports."
@@ -594,7 +611,7 @@ function SettingsModal({ settings, onClose, onSaved }: { settings: Settings; onC
               setError("");
               setPhase("saving");
               try {
-                await api("/api/settings", { method: "POST", json: { awsProfile: profile, awsRegion: region, claudeToken } });
+                await api("/api/settings", { method: "POST", json: { awsProfile: profile, awsRegions: regions, claudeToken } });
                 await onSaved();
               } catch (e) {
                 setError(String(e instanceof Error ? e.message : e));
