@@ -398,37 +398,57 @@ export async function forwardPort(instanceId: string, remotePort: number): Promi
 
 // The forwards reach a root shell (ttyd), the desktop and dev servers, and anything on this Mac
 // can connect to 127.0.0.1. A browser is the realistic attacker: a hostile page can rebind its
-// own hostname to 127.0.0.1, or open a WebSocket to 127.0.0.1 directly (WebSockets skip CORS).
-// So an HTTP request must name a loopback Host, and an Origin, when sent, must be loopback too.
-// Non-HTTP protocols pass: browsers can only speak HTTP to these ports.
+// own hostname to 127.0.0.1, or open a WebSocket to 127.0.0.1 directly (WebSockets skip CORS),
+// including a page served through another forward (a preview pulling in third-party scripts).
+// So an HTTP request must name a loopback Host, and an Origin, when sent, must be this forward's
+// own origin (ttyd's page talking to itself) or the app's (the noVNC client). Browsers can only
+// speak HTTP, so other protocols pass; local processes already hold the SSH key and AWS creds.
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
-const loopbackHost = (h: string) => LOOPBACK.has(h.trim().toLowerCase().replace(/:\d+$/, ""));
+const HEAD_CAP = 16_384;
 
-function httpAllowed(head: string): boolean {
+function hostPort(h: string): { host: string; port: string } {
+  const m = h.trim().toLowerCase().match(/^(\[[^\]]*\]|[^:]*)(?::(\d+))?$/);
+  return { host: m?.[1] ?? "", port: m?.[2] ?? "" };
+}
+
+function httpAllowed(head: string, localPort: number): boolean {
   const host = head.match(/\r\nhost:[ \t]*([^\r\n]*)/i)?.[1];
-  if (host === undefined || !loopbackHost(host)) return false;
+  if (host === undefined || !LOOPBACK.has(hostPort(host).host)) return false;
   const origin = head.match(/\r\norigin:[ \t]*([^\r\n]*)/i)?.[1]?.trim();
   if (!origin) return true;
   try {
-    return loopbackHost(new URL(origin).host);
+    const u = new URL(origin);
+    const appPort = process.env.PORT ?? "4100"; // next dev/start set PORT to the port they serve on
+    return u.protocol === "http:" && LOOPBACK.has(u.hostname) && (u.port === String(localPort) || u.port === appPort);
   } catch {
-    return false;
+    return false; // includes "null" (sandboxed frames, file: pages)
   }
 }
 
-/** Reads the start of a connection and lets it through (replaying those bytes) only if allowed. */
+const FORBIDDEN = "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nForbidden: open this through the app on localhost.\n";
+
+/**
+ * Reads the start of a connection and lets it through (replaying those bytes) only if allowed.
+ * Fails closed: anything that could still be an HTTP request line is buffered until the header
+ * block ends, and a head that outgrows the cap is refused rather than judged on a fragment.
+ */
 function admit(sock: net.Socket, accept: () => void) {
   let head = Buffer.alloc(0);
   const onData = (chunk: Buffer) => {
     head = Buffer.concat([head, chunk]);
     const text = head.toString("latin1");
-    const isHttp = /^[A-Z]+ \S+ HTTP\/1\.[01]\r\n/.test(text);
-    const complete = text.includes("\r\n\r\n") || head.length > 16_384;
-    if (isHttp && !complete) return;
+    const maybeHttp = /^[A-Z]{1,16}( |$)/.test(text);
+    if (maybeHttp && !text.includes("\r\n\r\n")) {
+      if (head.length > HEAD_CAP) {
+        sock.off("data", onData);
+        sock.end(FORBIDDEN);
+      }
+      return;
+    }
     sock.off("data", onData);
     sock.pause();
-    if (isHttp && !httpAllowed(text)) {
-      sock.end("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nForbidden: open this through the app on localhost.\n");
+    if (maybeHttp && !httpAllowed(text, sock.localPort ?? 0)) {
+      sock.end(FORBIDDEN);
       return;
     }
     sock.unshift(head);

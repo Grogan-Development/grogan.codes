@@ -144,16 +144,20 @@ export function explainAwsError(err: unknown, ctx: { type?: string; market?: Mar
 
 // ---- Launch -----------------------------------------------------------------
 
-const rootDevices = new Map<string, string>();
+const rootDevices = new Map<string, { name: string; snapshotGb: number }>();
 
-async function rootDeviceName(amiId: string, region: string): Promise<string> {
+/** The AMI's root device and its snapshot size: a root volume can't be smaller than the snapshot. */
+async function rootDevice(amiId: string, region: string): Promise<{ name: string; snapshotGb: number }> {
   const hit = rootDevices.get(amiId);
   if (hit) return hit;
   const res = await ec2(region).send(new DescribeImagesCommand({ ImageIds: [amiId] }));
-  const name = res.Images?.[0]?.RootDeviceName;
+  const img = res.Images?.[0];
+  const name = img?.RootDeviceName;
   if (!name) throw new Error(`AMI ${amiId} not found in ${region}. Rebuild the image or redeploy the infra/ stack.`);
-  rootDevices.set(amiId, name);
-  return name;
+  const snapshotGb = img.BlockDeviceMappings?.find((b) => b.DeviceName === name)?.Ebs?.VolumeSize ?? 0;
+  const dev = { name, snapshotGb };
+  rootDevices.set(amiId, dev);
+  return dev;
 }
 
 type Placement = { subnetId: string; az: string; azId: string };
@@ -217,8 +221,10 @@ export async function launchInstance(opts: { workspaceId: string; machine: Machi
   const ctx = { type: m.type, market, region };
   try {
     const [templateId, amiId] = await Promise.all([param(PARAMS.launchTemplateId(m.variant), region), param(PARAMS.amiId(m.variant), region)]);
-    const device = await rootDeviceName(amiId, region);
-    const volumeGb = rootVolumeGb(m, opts.diskGb);
+    const root = await rootDevice(amiId, region);
+    const device = root.name;
+    // GPU AMIs (the Deep Learning base) ship a root snapshot bigger than the smallest disk step.
+    const volumeGb = rootVolumeGb(m, Math.max(opts.diskGb, root.snapshotGb));
     const tags: Tag[] = [{ ...TAG_APP }, { Key: TAG_WORKSPACE, Value: workspaceId }, { Key: "Name", Value: `codespace-${workspaceId}` }];
     const resources: ResourceType[] = ["instance", "volume", ...(market === "spot" ? (["spot-instances-request"] as const) : [])];
     const nonce = Date.now().toString(36);
