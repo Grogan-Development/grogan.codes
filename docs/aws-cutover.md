@@ -128,3 +128,43 @@ Region is a price decision. Workspaces may run in any region in `awsRegions()` (
   - **"Cheapest" (default):** shows which region it would pick and the price there.
   - **Named regions:** one entry per region, with that region's spot price for the selected type. Regions that aren't ready or don't offer the type are disabled, with the reason.
   - The workspace card shows its region (already does).
+
+## Cold storage and AMI retention (added before first deploy)
+
+### Cold tier: snapshot and delete after N days stopped
+- **Why:** a stopped workspace still pays for its whole provisioned gp3 volume ($0.08/GB-month). A snapshot is billed only for data actually written ($0.05/GB-month). A 50 GB volume with 12 GB used drops from ~$4.00 to ~$0.60 a month.
+- **Setting:** `coldAfterDays()` in `config.ts` reads the Keychain `cold-after-days`, else `CODESPACE_COLD_AFTER_DAYS`, else `DEFAULT_COLD_AFTER_DAYS = 3`. `0` means never.
+- **New DB columns on `workspaces`:**
+  - `stopped_at` (ms; set whenever the row becomes `stopped`, cleared on start)
+  - `archive_snapshot_id`
+  - `archived_at`
+- **Archiving** (the reaper, once per hour is enough). For each row that is `stopped`, has an `instance_id`, and has `stopped_at` older than N days:
+  1. **Clean shutdown first if hibernated.** If the row has `hibernate=1` and the instance was hibernated rather than stopped (StateReason or a remembered flag), start it, wait for running, then stop it with no hibernate. A hibernation image left on the root volume must not reach a new instance, which would try to resume from it.
+  2. **Snapshot.** Call `CreateSnapshot` on the root volume with tags `app=codespace`, `workspace=<id>`, `Name=codespace-<id>`, and description `codespace <id> cold storage`. Wait for `completed`, which can take minutes, and poll without blocking the reaper loop.
+  3. **Terminate and record.** Terminate the instance (the root volume has DeleteOnTermination; for spot, cancel the request as today). Set `instance_id = NULL`, `archive_snapshot_id`, `archived_at`. The state stays `stopped`.
+  - If any step fails, leave the instance as it is and record the error. The workspace must never be left with neither instance nor snapshot.
+  - Add a new action `archive` that does this now, from the UI.
+- **Restoring:** `start` on a row with `archive_snapshot_id` and no instance:
+  1. Launch exactly as `launchInstance` does (same type, market and region; any AZ, since snapshots aren't tied to one).
+  2. Set the root mapping to `{ DeviceName: <AMI root device>, Ebs: { SnapshotId, VolumeSize: max(disk_gb, snapshot size), VolumeType: gp3, Encrypted: true, DeleteOnTermination: true } }`.
+  3. Wait for SSH, re-run `bootstrap` (idempotent), then delete the snapshot and clear `archive_snapshot_id`/`archived_at`.
+  - Cloud-init sees a new instance ID, so it re-runs per-instance modules: new host keys, and the user-data key appended again. Both are harmless.
+- **Delete** of an archived workspace deletes the snapshot. The unsaved-work check can't run, so the API returns 409 "The workspace is in cold storage. Force delete to remove it and its snapshot."
+- **Workspace JSON** adds `archived: boolean`, `archived_at`.
+- **UI:**
+  - A "Cold" badge on the card and header.
+  - Start on a cold workspace says it restores from a snapshot and takes a few extra minutes; running processes are lost but files are kept.
+  - The workspace menu gets an "Archive now" action for stopped workspaces.
+  - Settings gets "Move stopped workspaces to cold storage after N days (0 = never)".
+  - `GET /api/settings` returns `coldAfterDays`; `POST` accepts `coldAfterDays` (an integer from 0 to 365) and stores the `cold-after-days` secret.
+- **IAM** (CodespaceApp):
+  - `ec2:CreateSnapshot` on volumes with resource tag `app=codespace`, and on snapshots with request tag `app=codespace`.
+  - `ec2:CreateTags` with `ec2:CreateAction=CreateSnapshot`.
+  - `ec2:DeleteSnapshot` on snapshots with resource tag `app=codespace`.
+  - `RunInstances` must allow a snapshot as a block-device source; the snapshot statement is already unconditioned.
+  - DescribeSnapshots is covered by `Describe*`.
+
+### AMI retention
+- An Image Builder lifecycle policy, in the home stack, keeps the **latest 2** images per pipeline. Older ones are deregistered, with their snapshots deleted, in **every distribution region**.
+- If Image Builder lifecycle policies can't clean up distributed copies, add a scheduled Lambda that does it, matching AMIs by the Image Builder tags.
+- The policy needs its own execution role (`EC2ImageBuilderLifecycleExecutionPolicy`).

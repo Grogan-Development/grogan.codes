@@ -21,6 +21,14 @@ export function awsRegion(): string {
   return awsRegions()[0];
 }
 
+/** Days a workspace stays stopped before its disk moves to a snapshot (0 = never). Default 3. */
+export const DEFAULT_COLD_AFTER_DAYS = 3;
+
+export function coldAfterDays(): number {
+  const n = Number(getSecret("cold-after-days") ?? "");
+  return Number.isFinite(n) && n >= 0 && (getSecret("cold-after-days") ?? "") !== "" ? n : DEFAULT_COLD_AFTER_DAYS;
+}
+
 export function awsProfile(): string | undefined {
   return getSecret("aws-profile") || process.env.AWS_PROFILE || undefined;
 }

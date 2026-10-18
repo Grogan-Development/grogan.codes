@@ -3,12 +3,13 @@ import { execFileSync } from "node:child_process";
 // Credentials live in the macOS Keychain (service "codespace"); env vars override.
 const SERVICE = "codespace";
 
-/** AWS profile and regions aren't secret, but live here so Settings has one store. */
-export type SecretName = "aws-profile" | "aws-regions" | "claude-oauth-token";
+/** AWS profile, regions and the cold-storage delay aren't secret, but live here so Settings has one store. */
+export type SecretName = "aws-profile" | "aws-regions" | "cold-after-days" | "claude-oauth-token";
 
 const ENV: Record<SecretName, string> = {
   "aws-profile": "CODESPACE_AWS_PROFILE",
   "aws-regions": "CODESPACE_AWS_REGIONS",
+  "cold-after-days": "CODESPACE_COLD_AFTER_DAYS",
   "claude-oauth-token": "CLAUDE_CODE_OAUTH_TOKEN",
 };
 
