@@ -424,10 +424,20 @@ export function spotInterrupted(info: InstanceInfo): boolean {
 }
 
 export async function startInstance(id: string, region = awsRegion()) {
-  try {
-    await ec2(region).send(new StartInstancesCommand({ InstanceIds: [id] }));
-  } catch (err) {
-    throw explainAwsError(err, { region });
+  // A persistent spot request trails its instance: right after a stop or hibernate it is still
+  // "marked-for-stop", and StartInstances refuses until it settles to "disabled" (a minute or two).
+  const deadline = Date.now() + 180_000;
+  for (;;) {
+    try {
+      await ec2(region).send(new StartInstancesCommand({ InstanceIds: [id] }));
+      return;
+    } catch (err) {
+      if ((err as { name?: string }).name === "IncorrectSpotRequestState" && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 5_000));
+        continue;
+      }
+      throw explainAwsError(err, { region });
+    }
   }
 }
 

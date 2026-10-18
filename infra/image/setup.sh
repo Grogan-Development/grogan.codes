@@ -7,6 +7,11 @@
 #   sudo CODESPACE_VARIANT=cpu-arm64 bash setup.sh
 #
 # Idempotent: every step checks or overwrites its own state, so re-running is safe.
+#
+# Under Image Builder the script runs twice. The first pass installs everything and switches the
+# SSM agent from the snap to AWS's .deb, but can't remove the snap agent that is running it. It
+# exits 194, AWSTOE reboots the instance and re-runs the step, now under the .deb agent, and the
+# second pass purges snapd and records a boot profile.
 # Contract: docs/aws-cutover.md, "Image contents". Paths must match src/server/workspaces.ts.
 set -euo pipefail
 set -x
@@ -47,6 +52,24 @@ log "variant=${VARIANT:-auto} gpu=$GPU arch=$(uname -m)"
 if command -v cloud-init >/dev/null 2>&1; then cloud-init status --wait >/dev/null || true; fi
 
 apt_get() { apt-get -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"; }
+
+# True when an ancestor process matches: by executable path prefix ("exe:/snap/...") or name.
+ancestor() {
+  local want="$1" pid="$PPID" exe comm
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
+    exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
+    comm="$(cat "/proc/$pid/comm" 2>/dev/null || true)"
+    case "$want" in
+      exe:*) [[ "$exe" == "${want#exe:}"* ]] && return 0 ;;
+      *) [ "$comm" = "$want" ] && return 0 ;;
+    esac
+    pid="$(awk '/^PPid:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)"
+  done
+  return 1
+}
+under_snap_agent() { ancestor exe:/snap/amazon-ssm-agent/; }
+under_toe() { ancestor awstoe; }
+NEED_REBOOT=0
 
 # ---- Keep snap browsers out ------------------------------------------------------------------
 # On 22.04 the chromium-browser and firefox debs are shims that install snaps. Snaps don't run
@@ -191,6 +214,9 @@ AcceptEnv CLAUDE_* CS_* MCP_* DISABLE_* ANTHROPIC_*
 # The app multiplexes every thread, port forward and command over one connection per workspace;
 # the default of 10 channels is too low.
 MaxSessions 64
+# cloud-init generates only these two on first boot (RSA keygen is the slow one).
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
 EOF
 grep -Eq '^\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config \
   || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
@@ -211,26 +237,85 @@ d /run/codespace 0755 root root -
 EOF
 systemd-tmpfiles --create /etc/tmpfiles.d/codespace.conf
 rm -f /etc/cloud/cloud-init.disabled
+# Trimmed to what a workspace needs; the stock lists also run apt mirror rewrites, snap, lxd,
+# landscape, ubuntu-advantage, ntp, keyboard/locale, fan, byobu and so on, on every first boot.
+# Kept: users-groups, write_files (early and `defer: true`), ssh host keys + root key policy,
+# hostname, growpart/resizefs for bigger root volumes, mounts (swap/ephemeral), and the
+# bootcmd/runcmd/scripts hooks so user-data scripts and the DLAMI's own hooks still run.
+# The 99- prefix sorts after the image's own cloud.cfg.d files, so these keys win.
 cat >/etc/cloud/cloud.cfg.d/99-codespace.cfg <<'EOF'
 # Codespace logs in as root with a key supplied in user-data.
 disable_root: false
+datasource_list: [ Ec2 ]
+ssh_deletekeys: true
+ssh_genkeytypes: [ ed25519, ecdsa ]
+ssh_quiet_keygen: true
+cloud_init_modules:
+  - migrator
+  - seed_random
+  - bootcmd
+  - write_files
+  - growpart
+  - resizefs
+  - disk_setup
+  - mounts
+  - set_hostname
+  - update_hostname
+  - update_etc_hosts
+  - users_groups
+  - ssh
+cloud_config_modules:
+  - runcmd
+cloud_final_modules:
+  - scripts_vendor
+  - scripts_per_once
+  - scripts_per_boot
+  - scripts_per_instance
+  - scripts_user
+  - write_files_deferred
 EOF
+cloud-init schema --system >/dev/null 2>&1 || cloud-init schema --config-file /etc/cloud/cloud.cfg.d/99-codespace.cfg
 systemctl enable cloud-init-local.service cloud-init.service cloud-config.service cloud-final.service
 # write_files `defer: true` (used by the app) needs cloud-init 21.3+; the contract asks for 22.1+.
 CI_VERSION="$(cloud-init --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)"
 [ "$(printf '%s\n22.1\n' "$CI_VERSION" | sort -V | head -n1)" = "22.1" ] || die "cloud-init $CI_VERSION is older than 22.1"
 
-# ---- amazon-ssm-agent -------------------------------------------------------------------------
-# A snap on Ubuntu (a deb on some AMIs). Enable it, but never restart it here: Image Builder runs
-# this script through the agent.
-log "amazon-ssm-agent"
-if snap list amazon-ssm-agent >/dev/null 2>&1; then
-  systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service
-elif systemctl cat amazon-ssm-agent.service >/dev/null 2>&1; then
-  systemctl enable amazon-ssm-agent.service
+# ---- amazon-ssm-agent: the .deb, not the snap -------------------------------------------------
+# The snap agent waits on snapd (seeding, squashfs mounts, apparmor) at every boot, which is most
+# of the delay before SSM answers. AWS's .deb runs as a plain systemd service.
+log "amazon-ssm-agent (.deb)"
+if ! dpkg-query -W -f='${Status}' amazon-ssm-agent 2>/dev/null | grep -q "install ok installed"; then
+  deb_arch="$(dpkg --print-architecture)"
+  token="$(curl -fsS -m 2 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null || true)"
+  region="$(curl -fsS -m 2 -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || true)"
+  tmp="$(mktemp -d)"
+  if [ -z "$region" ] || ! curl -fsSL -o "$tmp/amazon-ssm-agent.deb" \
+      "https://s3.${region}.amazonaws.com/amazon-ssm-${region}/latest/debian_${deb_arch}/amazon-ssm-agent.deb"; then
+    curl -fsSL -o "$tmp/amazon-ssm-agent.deb" \
+      "https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_${deb_arch}/amazon-ssm-agent.deb"
+  fi
+  # Don't let the package start a second agent next to the one that may be running this script.
+  printf '#!/bin/sh\nexit 101\n' >/usr/sbin/policy-rc.d
+  chmod 0755 /usr/sbin/policy-rc.d
+  dpkg -i "$tmp/amazon-ssm-agent.deb" || { rm -f /usr/sbin/policy-rc.d; die "dpkg -i amazon-ssm-agent.deb failed"; }
+  rm -f /usr/sbin/policy-rc.d
+  rm -rf "$tmp"
+fi
+systemctl enable amazon-ssm-agent.service
+SNAP_AGENT_UNIT=snap.amazon-ssm-agent.amazon-ssm-agent.service
+if under_snap_agent; then
+  # The snap agent is running us (Image Builder, or a Session Manager shell). Keep it alive for
+  # now, make sure the .deb agent isn't running beside it, and stop the snap one from coming back.
+  systemctl stop amazon-ssm-agent.service 2>/dev/null || true
+  systemctl disable "$SNAP_AGENT_UNIT" 2>/dev/null || true
+  systemctl mask "$SNAP_AGENT_UNIT"
+  NEED_REBOOT=1
 else
-  snap install amazon-ssm-agent --classic
-  systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service
+  if systemctl cat "$SNAP_AGENT_UNIT" >/dev/null 2>&1; then
+    systemctl disable --now "$SNAP_AGENT_UNIT" 2>/dev/null || true
+    systemctl mask "$SNAP_AGENT_UNIT"
+  fi
+  systemctl start amazon-ssm-agent.service
 fi
 
 # ---- Hibernation (CPU variants) ---------------------------------------------------------------
@@ -244,9 +329,22 @@ if [ "$GPU" = 0 ]; then
   cat >/etc/default/grub.d/99-codespace-nokaslr.cfg <<'EOF'
 GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT nokaslr"
 EOF
-  update-grub
-  grep -q nokaslr /boot/grub/grub.cfg || die "nokaslr missing from grub.cfg"
 fi
+
+# ---- Boot loader and kernel cmdline -----------------------------------------------------------
+# No menu wait, and no 30s recordfail pause after an unclean stop (spot reclaim, forced stop).
+# `quiet` keeps kernel messages off the serial console, which is slow to write to; the console
+# log still shows systemd's failures. resume=/resume_offset (set by the hibinit agent) and the
+# DLAMI's own parameters are left alone.
+log "GRUB"
+cat >/etc/default/grub.d/98-codespace-boot.cfg <<'EOF'
+GRUB_TIMEOUT=0
+GRUB_TIMEOUT_STYLE=hidden
+GRUB_RECORDFAIL_TIMEOUT=0
+GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT quiet"
+EOF
+update-grub
+if [ "$GPU" = 0 ]; then grep -q nokaslr /boot/grub/grub.cfg || die "nokaslr missing from grub.cfg"; fi
 
 # ---- Spot interruption watcher ----------------------------------------------------------------
 # Polls IMDSv2 every 5s. On a notice, writes the JSON body to /run/codespace/interruption; clears
@@ -295,6 +393,80 @@ systemctl daemon-reload
 systemctl enable codespace-spot-watcher.service
 systemctl restart codespace-spot-watcher.service
 
+# ---- Boot trimming ------------------------------------------------------------------------------
+# Units that do work at boot (or soon after) that a workspace doesn't need. Masked rather than
+# purged where other packages depend on them, so nothing pulls them back in on start.
+log "Boot trimming"
+systemctl set-default multi-user.target
+for unit in apt-daily.timer apt-daily-upgrade.timer motd-news.timer fwupd-refresh.timer ua-timer.timer \
+    apt-daily.service apt-daily-upgrade.service unattended-upgrades.service motd-news.service \
+    fwupd.service fwupd-refresh.service ModemManager.service multipathd.service multipathd.socket \
+    lxd-agent.service landscape-client.service ubuntu-advantage.service ua-reboot-cmds.service \
+    esm-cache.service apport.service pollinate.service keyboard-setup.service console-setup.service \
+    e2scrub_reap.service secureboot-db.service; do
+  systemctl disable "$unit" >/dev/null 2>&1 || true
+  systemctl mask "$unit" >/dev/null 2>&1 || true
+done
+# udisks2 stays installed (Thunar can use it) but only starts on demand over D-Bus.
+systemctl disable udisks2.service >/dev/null 2>&1 || true
+# Nothing patches itself behind the user's back; image rebuilds deliver updates.
+cat >/etc/apt/apt.conf.d/99codespace-periodic <<'EOF'
+APT::Periodic::Enable "0";
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";
+APT::Periodic::Download-Upgradeable-Packages "0";
+APT::Periodic::AutocleanInterval "0";
+EOF
+[ -f /etc/default/motd-news ] && sed -i 's/^ENABLED=.*/ENABLED=0/' /etc/default/motd-news
+# pam_motd runs these on every SSH login.
+chmod -x /etc/update-motd.d/* 2>/dev/null || true
+# Return as soon as one interface is up, and never wait more than 10s.
+for wo in /lib/systemd/systemd-networkd-wait-online /usr/lib/systemd/systemd-networkd-wait-online; do
+  if [ -x "$wo" ]; then
+    install -d /etc/systemd/system/systemd-networkd-wait-online.service.d
+    printf '[Service]\nExecStart=\nExecStart=%s --any --timeout=10\n' "$wo" \
+      >/etc/systemd/system/systemd-networkd-wait-online.service.d/10-codespace.conf
+    break
+  fi
+done
+# Packages with nothing to offer here. pollinate makes a network call to seed entropy on first
+# boot; the others only add services or login banners. None is part of the NVIDIA stack.
+purge=()
+for pkg in modemmanager lxd-agent-loader landscape-common landscape-client pollinate; do
+  dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed" && purge+=("$pkg")
+done
+if [ "${#purge[@]}" -gt 0 ]; then apt_get purge -y -q "${purge[@]}"; fi
+systemctl daemon-reload
+
+# ---- snapd: gone, and kept out ------------------------------------------------------------------
+# Only once the .deb agent is the one running (second pass under Image Builder, or a plain SSH
+# session by hand): removing snapd stops every snap service, including a snap SSM agent.
+cat >/etc/apt/preferences.d/codespace-no-snapd <<'EOF'
+Package: snapd
+Pin: release a=*
+Pin-Priority: -1
+EOF
+if [ "$NEED_REBOOT" = 0 ] && dpkg-query -W -f='${Status}' snapd 2>/dev/null | grep -q "install ok installed"; then
+  log "Purging snapd"
+  # Metapackages that depend on snapd (e.g. ubuntu-server) go with it. Mark what they pulled in as
+  # manually installed first, so a later `apt autoremove` doesn't strip the system.
+  for meta in $(apt-get -s purge snapd 2>/dev/null | awk '/^(Purg|Remv) / {print $2}'); do
+    case "$meta" in
+      ubuntu-*)
+        deps="$(apt-cache depends --installed "$meta" 2>/dev/null | awk '/(Depends|Recommends):/ {print $2}' | grep -v '^<' | sort -u || true)"
+        # shellcheck disable=SC2086
+        [ -n "$deps" ] && apt-mark manual $deps >/dev/null
+        ;;
+    esac
+  done
+  apt_get purge -y -q snapd
+fi
+apt-mark hold snapd >/dev/null 2>&1 || true
+if ! command -v snap >/dev/null 2>&1; then
+  rm -rf /snap /var/snap /var/lib/snapd /var/cache/snapd /root/snap /home/*/snap
+fi
+systemctl daemon-reload
+
 # ---- GPU sanity --------------------------------------------------------------------------------
 # The DLAMI ships the driver and CUDA; nothing to install. Build instances have no GPU, so a
 # failing nvidia-smi is only a warning here.
@@ -320,5 +492,26 @@ systemctl is-enabled codespace-spot-watcher.service ssh.service >/dev/null
 # ---- Shrink ------------------------------------------------------------------------------------
 apt_get clean
 rm -rf /var/lib/apt/lists/* /root/.npm/_cacache 2>/dev/null || true
+
+# ---- Reboot handoff, or boot profile ------------------------------------------------------------
+if [ "$NEED_REBOOT" = 1 ]; then
+  if under_toe; then
+    log "Rebooting so the .deb SSM agent takes over; AWSTOE re-runs this step afterwards"
+    exit 194
+  fi
+  set +x
+  echo "The snap SSM agent is running this shell, so snapd can't be purged yet." >&2
+  echo "Reboot, reconnect (the .deb agent takes over), and run this script again." >&2
+  exit 0
+fi
+# This boot already ran without snapd's agent, so it shows where the remaining time goes.
+{
+  echo "# codespace boot profile, $(date -u +%FT%TZ), variant=${VARIANT:-auto}, $(uname -r)"
+  echo "## systemd-analyze"; systemd-analyze 2>&1 || true
+  echo "## systemd-analyze blame | head -20"; systemd-analyze blame 2>&1 | head -20 || true
+  echo "## systemd-analyze critical-chain amazon-ssm-agent.service"
+  systemd-analyze critical-chain amazon-ssm-agent.service 2>&1 || true
+} >/var/log/codespace-boot-profile.txt
+cat /var/log/codespace-boot-profile.txt
 
 log "Codespace image setup complete (variant=${VARIANT:-auto})"

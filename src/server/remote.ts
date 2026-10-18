@@ -315,7 +315,9 @@ export async function waitForRemote(instanceId: string, timeoutMs = 300_000): Pr
   for (;;) {
     try {
       const r = await remote(instanceId);
-      const res = await run(r, "true", { timeout: 30 });
+      // First boot isn't over when sshd first answers: cloud-init's final stage can restart sshd
+      // and drop us mid-command. Wait it out here, where a dropped channel just means "retry".
+      const res = await run(r, "command -v cloud-init >/dev/null && cloud-init status --wait >/dev/null 2>&1; true", { timeout: 240 });
       if (res.exitCode === 0) return r;
       last = new Error(`probe exited ${res.exitCode}: ${res.output.slice(-500)}`);
       dropConnection(instanceId);

@@ -22,6 +22,7 @@ import {
   type InstanceInfo,
 } from "./aws/ec2";
 import { githubToken, gitIdentity } from "./secrets";
+import { applyLoadoutInBackground } from "./catalog";
 
 export type Workspace = {
   id: string;
@@ -247,8 +248,10 @@ async function provision(id: string) {
       setInstanceRegion(instanceId, regionOf(w));
       await waitForState(instanceId, "running", { region: regionOf(w) });
       setState(id, "setting up");
-      await bootstrap(await waitForRemote(instanceId));
+      const r = await waitForRemote(instanceId);
+      await bootstrap(r);
       setState(id, "started");
+      applyLoadoutInBackground(id, r);
     });
     for (const repo of listRepos(id)) if (repo.state !== "ready") await cloneRepo(id, repo.id);
   } catch (err) {
@@ -379,6 +382,7 @@ async function start(id: string): Promise<Remote> {
       db().prepare("UPDATE workspaces SET instance_started_at = ? WHERE id = ?").run(now(), id);
       setState(id, "started");
       touch(id); // or the reaper would pause it again on its next pass
+      applyLoadoutInBackground(id, r);
       return r;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

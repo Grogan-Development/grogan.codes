@@ -125,6 +125,34 @@ Notes:
   ```sh
   sudo CODESPACE_VARIANT=cpu-arm64 bash setup.sh
   ```
+  From a Session Manager shell, the first run switches the SSM agent and asks you to reboot and run it again. Over plain SSH it finishes in one go.
+
+### Boot speed
+
+The image is trimmed so SSH over SSM answers soon after the instance reaches `running`. It stays on Ubuntu 22.04, which is on EC2's hibernation-supported list.
+
+- **SSM agent:** AWS's `.deb` package, run as a plain systemd service. snapd is purged, pinned and held so apt can't bring it back, and `/snap` is removed. The snap agent had to wait for snapd's seeding and mounts at every boot.
+  - The switch needs a reboot mid-build. The first pass exits 194, AWSTOE reboots the instance and re-runs the step under the `.deb` agent, and that pass purges snapd. Builds take a few minutes longer.
+- **Masked:**
+  - the apt-daily and apt-daily-upgrade timers, unattended-upgrades, motd-news, fwupd
+  - ModemManager, multipathd, lxd-agent, landscape, the ubuntu-advantage timers, apport, pollinate
+  - keyboard-setup, console-setup, e2scrub_reap
+
+  udisks2 starts on demand only. `systemd-networkd-wait-online` returns on the first interface, with a 10s cap. The default target is `multi-user`.
+- **No automatic updates:** workspaces don't update themselves. Rebuild the images (`imageSchedule=weekly`, or by hand) to deliver patches; `apt` still works inside a workspace.
+- **cloud-init:**
+  - datasource `Ec2` only
+  - modules trimmed to users-groups, `write_files` (including `defer: true`), ssh host keys (ed25519 and ecdsa only), hostname, growpart/resizefs, mounts, and the bootcmd/runcmd/script hooks
+  - `disable_root: false`
+
+  The apt mirror is no longer rewritten per region, so copied images keep the home region's Ubuntu mirror.
+- **Kernel/GRUB:**
+  - `nokaslr` (CPU, for hibernation)
+  - `quiet` (less serial-console output)
+  - no menu timeout and no recordfail pause after an unclean stop
+  - the hibinit agent's `resume=` settings and the DLAMI's parameters are untouched
+- **GPU images:** only snapd and the services above are removed. The DLAMI's NVIDIA driver, CUDA and their services are left as they are.
+- **Measuring:** the second build pass writes `systemd-analyze`, `blame | head -20` and `critical-chain amazon-ssm-agent.service` to `/var/log/codespace-boot-profile.txt`. That's from the build instance's boot. On a workspace, run the same commands after a fresh launch to compare.
 
 ## Credentials for the app
 

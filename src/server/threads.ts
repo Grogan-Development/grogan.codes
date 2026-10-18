@@ -13,7 +13,7 @@ import { WORKSPACE_ROOT } from "./remote";
 import { spawnRemote } from "./transport";
 import { getSecret } from "./secrets";
 import { ensureStarted, getWorkspace, touch } from "./workspaces";
-import { applyLoadout, loadoutHash, loadoutMcpServers } from "./catalog";
+import { ensureLoadout, loadoutApplying, loadoutHash, loadoutMcpServers } from "./catalog";
 
 export type Thread = {
   id: string;
@@ -196,11 +196,11 @@ export class Runner {
     const r = await ensureStarted(ws.id);
 
     const loadout: string[] = JSON.parse(ws.loadout);
-    const hash = loadoutHash(loadout);
-    if (hash !== ws.loadout_applied_hash) {
+    // Usually already applied in the background after start; this joins a run still in
+    // flight, or applies a loadout that changed since.
+    if (loadoutApplying(ws.id) || loadoutHash(loadout) !== getWorkspace(ws.id).loadout_applied_hash) {
       this.setStatus("starting", "applying loadout");
-      await applyLoadout(r, loadout, (text) => this.emit({ type: "cs_log", text }, false));
-      db().prepare("UPDATE workspaces SET loadout_applied_hash = ? WHERE id = ?").run(hash, ws.id);
+      await ensureLoadout(ws.id, r, (text) => this.emit({ type: "cs_log", text }, false));
     }
 
     const token = getSecret("claude-oauth-token");
