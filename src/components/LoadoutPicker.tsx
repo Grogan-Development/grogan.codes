@@ -146,7 +146,7 @@ function AddMcp({ onDone }: { onDone: () => void }) {
         rows={5}
         className="w-full font-mono text-xs rounded-md bg-panel-2 border border-line p-2 outline-none focus:border-accent"
       />
-      <p className="text-xs text-muted">Same shape as an entry in .mcp.json. stdio commands run inside the sandbox.</p>
+      <p className="text-xs text-muted">Same shape as an entry in .mcp.json. stdio commands run on the workspace’s instance.</p>
       {err && <p className="text-bad text-xs">{err}</p>}
       <Button
         variant="primary"

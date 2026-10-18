@@ -1,55 +1,35 @@
 import { nanoid } from "nanoid";
-import type { Sandbox } from "modal";
 import { db, now } from "./db";
+import { remote, waitForRemote, forgetRemote, forwardPort, setInstanceRegion, run, mustRun, q, WORKSPACE_ROOT, HOME, TERMINAL_PORT, VNC_PORT, type Remote } from "./remote";
+import { awsRegion } from "./aws/config";
+import { machine, MARKETS, DISK_GB_STEPS, type Machine, type Market } from "./aws/machines";
 import {
-  modal,
-  modalApp,
-  sandbox,
-  forgetSandbox,
-  run,
-  mustRun,
-  q,
-  BASE_IMAGE,
-  MAX_LIFETIME_MS,
-  WORKSPACE_ROOT,
-  HOME,
-  TERMINAL_PORT,
-  VNC_PORT,
-} from "./modal";
+  launchInstance,
+  startInstance,
+  stopInstance,
+  terminateInstance,
+  describeInstance,
+  waitForState,
+  spotInterrupted,
+  rootVolumeGb,
+  type InstanceInfo,
+} from "./aws/ec2";
 import { githubToken, gitIdentity } from "./secrets";
-
-/** CPU cores and memory per size. A GPU, when chosen, is added on top. */
-export const SIZES = {
-  small: { cpu: 1, memoryMiB: 1024 },
-  medium: { cpu: 2, memoryMiB: 4096 },
-  large: { cpu: 4, memoryMiB: 8192 },
-} as const;
-export type Size = keyof typeof SIZES;
-
-/** Dial stops offered in the UI; the server accepts only these. */
-export const CPU_STEPS = [1, 2, 4, 6, 8, 12, 16, 24, 32];
-export const MEMORY_GB_STEPS = [1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128];
-export const DISK_GB_STEPS = [10, 20, 50, 100, 200, 500];
-
-/** Modal GPU types offered in the UI. */
-export const GPUS = ["T4", "L4", "A10G", "L40S", "A100", "A100-80GB", "H100", "H200", "B200"] as const;
 
 export type Workspace = {
   id: string;
   name: string;
-  sandbox_id: string | null;
   state: string;
   error: string | null;
-  /** The size name (small/medium/large). Rows from the Daytona era hold "daytona-vm-<size>". */
-  snapshot: string;
-  /** Modal GPU spec such as "H100" or "H100:2", or null for CPU only. */
-  gpu: string | null;
-  /** Filesystem snapshot the next start boots from; null until the first stop. */
-  image_id: string | null;
-  sandbox_started_at: number | null;
-  cpu: number | null;
-  memory_mib: number | null;
-  /** Modal can't size a sandbox's disk, so this is a soft quota the app watches (disk_used_mb). */
+  instance_id: string | null;
+  instance_type: string | null;
+  market: Market | null;
+  region: string | null;
+  az: string | null;
+  /** 1 when the instance was launched with hibernation, so pause keeps RAM. */
+  hibernate: number;
+  instance_started_at: number | null;
+  /** The root volume's real size in GiB, including room for RAM when hibernating. */
   disk_gb: number | null;
   disk_used_mb: number | null;
   idle_minutes: number;
@@ -57,6 +37,20 @@ export type Workspace = {
   loadout_applied_hash: string | null;
   created_at: number;
   last_activity_at: number;
+  /** NOT NULL legacy column; holds the instance type. */
+  snapshot: string;
+  /** @deprecated Modal era, no longer read. */
+  sandbox_id: string | null;
+  /** @deprecated Modal era, no longer read. */
+  image_id: string | null;
+  /** @deprecated Modal era, no longer read. */
+  sandbox_started_at: number | null;
+  /** @deprecated Modal era, no longer read. */
+  cpu: number | null;
+  /** @deprecated Modal era, no longer read. */
+  memory_mib: number | null;
+  /** @deprecated Modal era, no longer read. */
+  gpu: string | null;
 };
 
 export type Repo = {
@@ -76,6 +70,7 @@ export function listWorkspaces(): Workspace[] {
 export function getWorkspace(id: string): Workspace {
   const w = db().prepare("SELECT * FROM workspaces WHERE id = ?").get(id) as Workspace | undefined;
   if (!w) throw new Error(`Workspace ${id} not found`);
+  if (w.instance_id && w.region) setInstanceRegion(w.instance_id, w.region);
   return w;
 }
 
@@ -83,19 +78,31 @@ export function listRepos(workspaceId: string): Repo[] {
   return db().prepare("SELECT * FROM repos WHERE workspace_id = ? ORDER BY name").all(workspaceId) as Repo[];
 }
 
+/** The row for the API: legacy Modal columns dropped, the machine spec added (null for Modal-era rows). */
+export function workspaceJson(w: Workspace) {
+  const { sandbox_id, image_id, sandbox_started_at, cpu, memory_mib, gpu, ...rest } = w;
+  void [sandbox_id, image_id, sandbox_started_at, cpu, memory_mib, gpu];
+  return { ...rest, machine: machineOf(w) };
+}
+
+function machineOf(w: Workspace): Machine | null {
+  try {
+    return w.instance_type ? machine(w.instance_type) : null;
+  } catch {
+    return null;
+  }
+}
+
 function setState(id: string, state: string, error: string | null = null) {
   db().prepare("UPDATE workspaces SET state = ?, error = ? WHERE id = ?").run(state, error, id);
 }
 
-function sizeOf(w: Workspace): Size {
-  const s = w.snapshot.replace(/^daytona-(vm-)?/, "");
-  return s in SIZES ? (s as Size) : "large";
-}
+const regionOf = (w: Workspace) => w.region ?? awsRegion();
 
-export async function workspaceSandbox(id: string): Promise<Sandbox> {
+export async function workspaceRemote(id: string): Promise<Remote> {
   const w = getWorkspace(id);
-  if (!w.sandbox_id) throw new Error("Workspace isn't running");
-  return sandbox(w.sandbox_id);
+  if (!w.instance_id || (w.state !== "started" && w.state !== "setting up")) throw new Error("Workspace isn't running");
+  return remote(w.instance_id);
 }
 
 /** Normalize "owner/repo", https or ssh GitHub URLs into a clone URL and a folder name. */
@@ -114,44 +121,27 @@ function assertRepoName(name: string, input = name) {
   if (!/^[\w.-]+$/.test(name) || /^\.+$/.test(name)) throw new Error(`Can't use "${input}" as a repo: "${name}" isn't a valid folder name`);
 }
 
-/** "H100" or "H100:2"; anything else is rejected before a sandbox is created. */
-export function parseGpu(input: string | null | undefined): string | null {
-  if (!input) return null;
-  const [type, count = "1"] = input.split(":");
-  const n = Number(count);
-  if (!(GPUS as readonly string[]).includes(type) || !Number.isInteger(n) || n < 1 || n > 8) throw new Error(`Unknown GPU "${input}"`);
-  return n === 1 ? type : `${type}:${n}`;
-}
-
-export type Machine = { cpu: number; memoryGb: number; diskGb: number };
-
-function assertStep(value: number, steps: number[], what: string) {
-  if (!steps.includes(value)) throw new Error(`${what} must be one of ${steps.join(", ")}`);
-}
-
 export function createWorkspace(input: {
   name: string;
-  size: Size;
-  machine?: Machine;
-  gpu?: string | null;
+  instanceType: string;
+  market: Market;
+  diskGb: number;
   idleMinutes: number;
   repos: string[];
   loadout: string[];
 }) {
   const repos = input.repos.filter(Boolean).map(parseRepo); // validate before creating anything
-  const gpu = parseGpu(input.gpu);
-  const m = input.machine ?? { cpu: SIZES[input.size].cpu, memoryGb: SIZES[input.size].memoryMiB / 1024, diskGb: 50 };
-  assertStep(m.cpu, CPU_STEPS, "CPU");
-  assertStep(m.memoryGb, MEMORY_GB_STEPS, "Memory");
-  assertStep(m.diskGb, DISK_GB_STEPS, "Disk");
+  machine(input.instanceType);
+  if (!MARKETS.includes(input.market)) throw new Error(`Market must be one of ${MARKETS.join(", ")}`);
+  if (!DISK_GB_STEPS.includes(input.diskGb)) throw new Error(`Disk must be one of ${DISK_GB_STEPS.join(", ")} GB`);
   const id = nanoid(10);
   const t = now();
   db()
     .prepare(
-      `INSERT INTO workspaces (id, name, state, snapshot, gpu, cpu, memory_mib, disk_gb, idle_minutes, loadout, created_at, last_activity_at)
+      `INSERT INTO workspaces (id, name, state, snapshot, instance_type, market, region, disk_gb, idle_minutes, loadout, created_at, last_activity_at)
        VALUES (?, ?, 'creating', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(id, input.name, input.size, gpu, m.cpu, m.memoryGb * 1024, m.diskGb, input.idleMinutes, JSON.stringify(input.loadout), t, t);
+    .run(id, input.name, input.instanceType, input.instanceType, input.market, awsRegion(), input.diskGb, input.idleMinutes, JSON.stringify(input.loadout), t, t);
   for (const { url, name } of repos) {
     db().prepare("INSERT INTO repos (id, workspace_id, name, url, state) VALUES (?, ?, ?, ?, 'pending')").run(nanoid(10), id, name, url);
   }
@@ -162,44 +152,62 @@ export function createWorkspace(input: {
 /** Bootstrap failures get their own state so syncState can't paper over them. */
 export const SETUP_FAILED = "setup failed";
 
-/** Boot a sandbox for the workspace, from its last snapshot if it has one. */
-async function bootSandbox(w: Workspace): Promise<Sandbox> {
-  const m = modal();
-  const image = w.image_id ? await m.images.fromId(w.image_id) : m.images.fromRegistry(BASE_IMAGE);
-  const preset = SIZES[sizeOf(w)];
-  const cpu = w.cpu ?? preset.cpu;
-  const memoryMiB = w.memory_mib ?? preset.memoryMiB;
-  // Modal treats cpu/memoryMiB as reservations; the limits make the dials hard caps.
-  const sb = await m.sandboxes.create(await modalApp(), image, {
-    cpu,
-    cpuLimit: cpu,
-    memoryMiB,
-    memoryLimitMiB: memoryMiB,
-    gpu: w.gpu ?? undefined,
-    timeoutMs: MAX_LIFETIME_MS,
-    workdir: WORKSPACE_ROOT,
-    tags: { app: "codespace", workspace: w.id },
-  });
-  db().prepare("UPDATE workspaces SET sandbox_id = ?, sandbox_started_at = ? WHERE id = ?").run(sb.sandboxId, now(), w.id);
-  return sb;
+const MODAL_ERA = "Created on Modal, which this version no longer supports. Delete it.";
+
+/** Workspaces with an EC2 call in flight in this process; syncState leaves those alone. */
+const inflight = new Set<string>();
+
+async function guarded<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  if (inflight.has(id)) throw new Error("Workspace is busy with another start or stop. Try again in a moment.");
+  inflight.add(id);
+  try {
+    return await fn();
+  } finally {
+    inflight.delete(id);
+  }
+}
+
+/** The disk size the user picked: a launched row's disk_gb also holds the hibernation room. */
+function requestedDiskGb(w: Workspace, m: Machine): number {
+  const size = w.disk_gb ?? 50;
+  return w.instance_id && w.hibernate ? size - rootVolumeGb(m, 0) : size;
+}
+
+/** Launch a new instance, or reuse the one a failed setup left behind. */
+async function bootInstance(w: Workspace): Promise<string> {
+  const region = regionOf(w);
+  const existing = w.instance_id ? await describeInstance(w.instance_id, region) : null;
+  if (existing && existing.state !== "terminated" && existing.state !== "shutting-down") {
+    if (existing.state === "stopping") await waitForState(w.instance_id!, "stopped", { region });
+    if (existing.state === "stopping" || existing.state === "stopped") await startInstance(w.instance_id!, region);
+    return w.instance_id!;
+  }
+  const m = machine(w.instance_type!);
+  const l = await launchInstance({ workspaceId: w.id, machine: m, market: (w.market ?? "on-demand") as Market, diskGb: requestedDiskGb(w, m), region });
+  db()
+    .prepare("UPDATE workspaces SET instance_id = ?, az = ?, region = ?, hibernate = ?, disk_gb = ?, instance_started_at = ? WHERE id = ?")
+    .run(l.instanceId, l.az, region, l.hibernate ? 1 : 0, l.volumeGb, now(), w.id);
+  // Deleted while RunInstances was in flight: nothing else knows about this instance.
+  if (!db().prepare("SELECT 1 FROM workspaces WHERE id = ?").get(w.id)) {
+    await terminateInstance(l.instanceId, region);
+    throw new Error("Workspace was deleted during setup");
+  }
+  return l.instanceId;
 }
 
 async function provision(id: string) {
-  const w = getWorkspace(id);
   try {
-    let sb: Sandbox;
-    const alive = w.sandbox_id ? await isAlive(w.sandbox_id) : false;
-    if (alive) {
-      // Retrying a failed setup: reuse the sandbox that was already created.
-      setState(id, "setting up");
-      sb = await sandbox(w.sandbox_id!, true);
-    } else {
+    await guarded(id, async () => {
+      const w = getWorkspace(id);
+      if (!w.instance_type) throw new Error(MODAL_ERA);
       setState(id, "creating");
-      sb = await bootSandbox(w);
+      const instanceId = await bootInstance(w);
+      setInstanceRegion(instanceId, regionOf(w));
+      await waitForState(instanceId, "running", { region: regionOf(w) });
       setState(id, "setting up");
-    }
-    await bootstrap(sb);
-    setState(id, "started");
+      await bootstrap(await waitForRemote(instanceId));
+      setState(id, "started");
+    });
     for (const repo of listRepos(id)) if (repo.state !== "ready") await cloneRepo(id, repo.id);
   } catch (err) {
     setState(id, SETUP_FAILED, String(err instanceof Error ? err.message : err));
@@ -211,25 +219,28 @@ export function retrySetup(id: string) {
   void provision(id);
 }
 
-/** Idempotent machine setup: Claude Code, gh, ttyd, git identity and GitHub auth. */
-export async function bootstrap(sb: Sandbox) {
-  await mustRun(sb, `mkdir -p ${WORKSPACE_ROOT} ${HOME}/.claude`);
-  await mustRun(sb, `command -v claude >/dev/null || curl -fsSL https://claude.ai/install.sh | bash`, { timeout: 900 });
-  await run(sb, `command -v gh >/dev/null || (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gh)`, { timeout: 900 });
+/**
+ * Idempotent machine setup. The AMI ships Claude Code, gh and ttyd, so on a fresh image this
+ * only verifies them, then sets git identity, GitHub auth and Claude's onboarding flag.
+ */
+export async function bootstrap(r: Remote) {
+  await mustRun(r, `mkdir -p ${WORKSPACE_ROOT} ${HOME}/.claude`);
+  await mustRun(r, `command -v claude >/dev/null || curl -fsSL https://claude.ai/install.sh | bash`, { timeout: 900 });
+  await run(r, `command -v gh >/dev/null || (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gh)`, { timeout: 900 });
   await run(
-    sb,
+    r,
     `command -v ttyd >/dev/null || (curl -fsSL -o /usr/local/bin/ttyd https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.$(uname -m) && chmod +x /usr/local/bin/ttyd)`,
     { timeout: 300 },
   );
   const id = gitIdentity();
-  if (id.name) await run(sb, `git config --global user.name ${q(id.name)}`);
-  if (id.email) await run(sb, `git config --global user.email ${q(id.email)}`);
+  if (id.name) await run(r, `git config --global user.name ${q(id.name)}`);
+  if (id.email) await run(r, `git config --global user.email ${q(id.email)}`);
   const token = githubToken();
   if (token) {
-    await run(sb, `printf %s "$CS_GH_TOKEN" | gh auth login --with-token && gh auth setup-git`, { env: { CS_GH_TOKEN: token } });
+    await run(r, `printf %s "$CS_GH_TOKEN" | gh auth login --with-token && gh auth setup-git`, { env: { CS_GH_TOKEN: token } });
   }
   // Skip Claude's first-run onboarding in the terminal.
-  await run(sb, `test -f ~/.claude.json || echo '{"hasCompletedOnboarding":true,"theme":"dark"}' > ~/.claude.json`);
+  await run(r, `test -f ~/.claude.json || echo '{"hasCompletedOnboarding":true,"theme":"dark"}' > ~/.claude.json`);
 }
 
 export function addRepo(workspaceId: string, input: string) {
@@ -246,10 +257,10 @@ async function cloneRepo(workspaceId: string, repoId: string) {
     db().prepare("UPDATE repos SET state = ?, error = ? WHERE id = ?").run(state, error, repoId);
   try {
     setRepo("cloning");
-    const sb = await ensureStarted(workspaceId);
+    const r = await ensureStarted(workspaceId);
     const dest = `${WORKSPACE_ROOT}/${repo.name}`;
-    await mustRun(sb, `test -d ${q(dest)}/.git || git clone ${q(repo.url)} ${q(dest)}`, { timeout: 1800 });
-    const branch = (await run(sb, `git -C ${q(dest)} rev-parse --abbrev-ref HEAD`)).output.trim();
+    await mustRun(r, `test -d ${q(dest)}/.git || git clone ${q(repo.url)} ${q(dest)}`, { timeout: 1800 });
+    const branch = (await run(r, `git -C ${q(dest)} rev-parse --abbrev-ref HEAD`)).output.trim();
     db().prepare("UPDATE repos SET branch = ? WHERE id = ?").run(branch, repoId);
     setRepo("ready");
   } catch (err) {
@@ -261,15 +272,15 @@ export type RepoRisk = { repo: string; dirty: string[]; unpushed: string[]; stas
 
 /** Work that exists only in the workspace and would be lost if it is deleted. */
 export async function unsavedWork(workspaceId: string, onlyRepo?: string): Promise<RepoRisk[]> {
-  const sb = await workspaceSandbox(workspaceId);
-  const out = (await run(sb, `cd ${WORKSPACE_ROOT} 2>/dev/null && ls -d */.git 2>/dev/null | sed 's#/.git##'`)).output;
+  const r = await workspaceRemote(workspaceId);
+  const out = (await run(r, `cd ${WORKSPACE_ROOT} 2>/dev/null && ls -d */.git 2>/dev/null | sed 's#/.git##'`)).output;
   const names = out.split("\n").map((s) => s.trim()).filter(Boolean).filter((n) => onlyRepo === undefined || n === onlyRepo);
   const risks: RepoRisk[] = [];
   for (const name of names) {
     const dir = q(`${WORKSPACE_ROOT}/${name}`);
-    const dirty = (await run(sb, `git -C ${dir} status --porcelain`)).output.split("\n").filter(Boolean);
-    const unpushed = (await run(sb, `git -C ${dir} log --branches --not --remotes --oneline`)).output.split("\n").filter(Boolean);
-    const stashes = (await run(sb, `git -C ${dir} stash list`)).output.split("\n").filter(Boolean).length;
+    const dirty = (await run(r, `git -C ${dir} status --porcelain`)).output.split("\n").filter(Boolean);
+    const unpushed = (await run(r, `git -C ${dir} log --branches --not --remotes --oneline`)).output.split("\n").filter(Boolean);
+    const stashes = (await run(r, `git -C ${dir} stash list`)).output.split("\n").filter(Boolean).length;
     if (dirty.length || unpushed.length || stashes) risks.push({ repo: name, dirty, unpushed, stashes });
   }
   return risks;
@@ -278,7 +289,7 @@ export async function unsavedWork(workspaceId: string, onlyRepo?: string): Promi
 export async function removeRepo(workspaceId: string, repoId: string) {
   const repo = db().prepare("SELECT * FROM repos WHERE id = ? AND workspace_id = ?").get(repoId, workspaceId) as Repo | undefined;
   if (!repo) throw new Error(`Repo ${repoId} not found`);
-  const sb = await workspaceSandbox(workspaceId);
+  const r = await workspaceRemote(workspaceId);
   // Rows saved before names were validated can hold "" or "..": drop the row, never the folder.
   try {
     assertRepoName(repo.name);
@@ -286,42 +297,58 @@ export async function removeRepo(workspaceId: string, repoId: string) {
     db().prepare("DELETE FROM repos WHERE id = ?").run(repoId);
     return;
   }
-  await run(sb, `rm -rf ${q(`${WORKSPACE_ROOT}/${repo.name}`)}`);
+  await run(r, `rm -rf ${q(`${WORKSPACE_ROOT}/${repo.name}`)}`);
   db().prepare("DELETE FROM repos WHERE id = ?").run(repoId);
 }
 
-async function isAlive(sandboxId: string): Promise<boolean> {
-  try {
-    const sb = await sandbox(sandboxId, true);
-    return (await sb.poll()) === null;
-  } catch {
-    return false;
-  }
+// ---- Lifecycle --------------------------------------------------------------
+
+const SPOT_RECLAIMED = "AWS reclaimed the spot capacity and stopped this workspace. Files were kept; start it again when capacity returns.";
+const TERMINATED = "The instance was terminated outside Codespace, so its disk is gone. Delete this workspace.";
+
+/** Start (or wait out a start already under way) and return a connection once sshd answers. */
+async function start(id: string): Promise<Remote> {
+  return guarded(id, async () => {
+    const w = getWorkspace(id);
+    if (!w.instance_type) throw new Error(MODAL_ERA);
+    if (!w.instance_id) throw new Error("Workspace has no instance. Retry setup.");
+    const region = regionOf(w);
+    setState(id, "starting");
+    try {
+      let info = await describeInstance(w.instance_id, region);
+      if (!info || info.state === "terminated" || info.state === "shutting-down") throw new Error(TERMINATED);
+      if (info.state === "stopping") info = await waitForState(w.instance_id, "stopped", { region });
+      if (info.state === "stopped") await startInstance(w.instance_id, region);
+      await waitForState(w.instance_id, "running", { region });
+      const r = await waitForRemote(w.instance_id);
+      db().prepare("UPDATE workspaces SET instance_started_at = ? WHERE id = ?").run(now(), id);
+      setState(id, "started");
+      return r;
+    } catch (err) {
+      await reconcile(getWorkspace(id), err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+  });
 }
 
-/**
- * Modal sandboxes can't pause, so "pause" and "stop" both snapshot the filesystem and
- * terminate the sandbox. The next start boots a new sandbox from that snapshot: files
- * are kept, running processes are not.
- */
-async function snapshotAndStop(id: string) {
-  const w = getWorkspace(id);
-  if (!w.sandbox_id) return;
-  setState(id, "snapshotting");
-  const sb = await sandbox(w.sandbox_id, true);
-  const image = await sb.snapshotFilesystem({ timeoutMs: 600_000 });
-  db().prepare("UPDATE workspaces SET image_id = ? WHERE id = ?").run(image.imageId, id);
-  await sb.terminate();
-  forgetSandbox(w.sandbox_id);
-  db().prepare("UPDATE workspaces SET sandbox_id = NULL, sandbox_started_at = NULL WHERE id = ?").run(id);
-  setState(id, "stopped");
-}
-
-async function start(id: string): Promise<Sandbox> {
-  setState(id, "starting");
-  const sb = await bootSandbox(getWorkspace(id));
-  setState(id, "started");
-  return sb;
+/** Pause hibernates when the instance was launched for it (RAM survives); otherwise both are a plain stop. */
+async function stop(id: string, hibernate: boolean) {
+  await guarded(id, async () => {
+    const w = getWorkspace(id);
+    if (!w.instance_id) return;
+    const region = regionOf(w);
+    setState(id, "stopping");
+    try {
+      forgetRemote(w.instance_id);
+      await stopInstance(w.instance_id, { hibernate: hibernate && w.hibernate === 1 }, region);
+      await waitForState(w.instance_id, "stopped", { region });
+      db().prepare("UPDATE workspaces SET instance_started_at = NULL WHERE id = ?").run(id);
+      setState(id, "stopped");
+    } catch (err) {
+      await reconcile(getWorkspace(id), err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+  });
 }
 
 export async function lifecycle(id: string, action: "start" | "pause" | "stop") {
@@ -329,22 +356,19 @@ export async function lifecycle(id: string, action: "start" | "pause" | "stop") 
     if (action === "start") {
       const w = await syncState(id);
       if (w.state !== "started") await start(id);
-    } else await snapshotAndStop(id);
+    } else await stop(id, action === "pause");
   } catch (err) {
-    setState(id, "error", String(err instanceof Error ? err.message : err));
+    // start/stop already recorded EC2's real state with the message; only fill in what they couldn't.
+    const w = getWorkspace(id);
+    if (!w.error) setState(id, w.state === "started" || w.state === "stopped" ? w.state : "error", String(err instanceof Error ? err.message : err));
   }
 }
 
 export async function deleteWorkspace(id: string) {
   const w = getWorkspace(id);
-  if (w.sandbox_id) {
-    try {
-      const sb = await sandbox(w.sandbox_id, true);
-      await sb.terminate();
-    } catch (err) {
-      if (!/not ?found/i.test(String(err))) throw err;
-    }
-    forgetSandbox(w.sandbox_id);
+  if (w.instance_id) {
+    forgetRemote(w.instance_id);
+    await terminateInstance(w.instance_id, regionOf(w));
   }
   db().prepare("DELETE FROM workspaces WHERE id = ?").run(id);
 }
@@ -353,33 +377,52 @@ export async function setIdleMinutes(id: string, minutes: number) {
   db().prepare("UPDATE workspaces SET idle_minutes = ? WHERE id = ?").run(minutes, id);
 }
 
-const BUSY = ["creating", "setting up", "starting", "snapshotting", SETUP_FAILED];
+/** Provisioning owns these states; a failed setup stays put until retried. */
+const SETUP_STATES = ["creating", "setting up", SETUP_FAILED];
 
-/** Notice sandboxes that ended on their own (lifetime cap, crash) and recover from interrupted snapshots. */
-export async function syncState(id: string) {
-  const w = getWorkspace(id);
-  if (BUSY.includes(w.state)) return w;
-  if (!w.sandbox_id) {
-    if (w.state === "started") setState(id, "stopped");
-    return getWorkspace(id);
-  }
-  if (await isAlive(w.sandbox_id)) {
-    if (w.state !== "started") setState(id, "started");
+/** Write EC2's view of the instance into the row. `error` overrides the message for a failed action. */
+async function reconcile(w: Workspace, error: string | null = null, info?: InstanceInfo | null): Promise<Workspace> {
+  if (!w.instance_id) return w;
+  info = info === undefined ? await describeInstance(w.instance_id, regionOf(w)) : info;
+  const keep = (s: string) => (w.state === s ? w.error : null); // e.g. the spot message on a stopped row
+  if (!info || info.state === "terminated" || info.state === "shutting-down") {
+    forgetRemote(w.instance_id);
+    setState(w.id, "error", TERMINATED);
+  } else if (info.state === "running") {
+    setState(w.id, "started", error);
+  } else if (info.state === "pending") {
+    setState(w.id, "starting", error);
+  } else if (info.state === "stopping") {
+    forgetRemote(w.instance_id);
+    setState(w.id, "stopping", error);
   } else {
-    forgetSandbox(w.sandbox_id);
-    db().prepare("UPDATE workspaces SET sandbox_id = NULL, sandbox_started_at = NULL WHERE id = ?").run(id);
-    setState(id, "stopped", w.image_id ? "The sandbox ended on its own. Changes since the last snapshot were lost." : "The sandbox ended before its first snapshot.");
+    forgetRemote(w.instance_id);
+    if (w.instance_started_at) db().prepare("UPDATE workspaces SET instance_started_at = NULL WHERE id = ?").run(w.id);
+    setState(w.id, "stopped", error ?? (spotInterrupted(info) ? SPOT_RECLAIMED : keep("stopped")));
   }
-  return getWorkspace(id);
+  return getWorkspace(w.id);
 }
 
-/** Make sure a sandbox is running before using it (boots one from the last snapshot). */
-export async function ensureStarted(id: string): Promise<Sandbox> {
+/** Notice what happened to the instance without us: spot reclaims, a console stop, termination. */
+export async function syncState(id: string) {
+  const w = getWorkspace(id);
+  if (!w.instance_type || !w.instance_id || SETUP_STATES.includes(w.state) || inflight.has(id)) return w;
+  try {
+    return await reconcile(w);
+  } catch (err) {
+    console.error(`[syncState ${id}]`, err); // AWS unreachable or credentials expired: show the last known state
+    return w;
+  }
+}
+
+/** Make sure the instance is running before using it, starting it if needed. */
+export async function ensureStarted(id: string): Promise<Remote> {
   const w = await syncState(id);
+  if (!w.instance_type) throw new Error(MODAL_ERA);
   if (w.state === SETUP_FAILED) throw new Error(`Workspace setup failed: ${w.error ?? "unknown error"}. Retry setup first.`);
-  if (w.state === "started" && w.sandbox_id) return sandbox(w.sandbox_id);
-  if (w.state === "setting up" && w.sandbox_id) return sandbox(w.sandbox_id);
-  if (BUSY.includes(w.state)) throw new Error(`Workspace is ${w.state}. Try again in a moment.`);
+  if ((w.state === "started" || w.state === "setting up") && w.instance_id) return remote(w.instance_id);
+  if (w.state === "error" && w.error === TERMINATED) throw new Error(TERMINATED);
+  if (SETUP_STATES.includes(w.state) || inflight.has(id)) throw new Error(`Workspace is ${w.state}. Try again in a moment.`);
   return start(id);
 }
 
@@ -390,34 +433,35 @@ export function touch(id: string) {
   db().prepare("UPDATE workspaces SET last_activity_at = ? WHERE id = ?").run(now(), id);
 }
 
-/** Snapshot before Modal's 24h cap so a long-lived workspace never loses work to it. */
-const LIFETIME_MARGIN_MS = 30 * 60_000;
-
 const DISK_CHECK_MS = 5 * 60_000;
 let lastDiskCheck = 0;
 
-/** Record how much of its disk quota each running workspace uses; the UI warns as it fills. */
+/** Record how much of its root volume each running workspace uses; the UI warns as it fills. */
 async function checkDisk(running: Workspace[]) {
   if (now() - lastDiskCheck < DISK_CHECK_MS) return;
   lastDiskCheck = now();
   for (const w of running) {
     try {
-      const sb = await sandbox(w.sandbox_id!);
-      // df under Modal's gVisor doesn't track overlay writes, so measure the home directory itself.
-      const used = Number((await run(sb, `du -sm ${HOME} 2>/dev/null | cut -f1`, { timeout: 120 })).output.trim());
+      const r = await remote(w.instance_id!);
+      const used = parseInt((await run(r, `df -BM --output=used / | tail -1`, { timeout: 60 })).output.trim(), 10);
       if (Number.isFinite(used)) db().prepare("UPDATE workspaces SET disk_used_mb = ? WHERE id = ?").run(used, w.id);
     } catch {}
   }
 }
 
 async function reap() {
-  const running = db().prepare("SELECT * FROM workspaces WHERE state = 'started' AND sandbox_id IS NOT NULL").all() as Workspace[];
+  const rows = db().prepare("SELECT * FROM workspaces WHERE state = 'started' AND instance_id IS NOT NULL").all() as Workspace[];
+  const running: Workspace[] = [];
+  for (const w of rows) {
+    // Catches spot reclaims and console stops within a minute, even with no one looking.
+    const synced = await syncState(w.id).catch(() => w);
+    if (synced.state === "started") running.push(synced);
+  }
   await checkDisk(running);
   for (const w of running) {
     const busy = db().prepare("SELECT 1 FROM threads WHERE workspace_id = ? AND status IN ('starting', 'running', 'waiting')").get(w.id);
     const idle = now() - w.last_activity_at > w.idle_minutes * 60_000;
-    const nearCap = w.sandbox_started_at !== null && now() - w.sandbox_started_at > MAX_LIFETIME_MS - LIFETIME_MARGIN_MS;
-    if ((idle && !busy) || nearCap) await lifecycle(w.id, "stop");
+    if (idle && !busy) await lifecycle(w.id, "pause");
   }
 }
 
@@ -429,31 +473,28 @@ if (!g.__csReaper) {
 
 // ---- Ports, terminal, desktop and diff --------------------------------------
 
-/** An auth-gated URL for a port: Modal's proxy checks the connect token in the query string. */
-export async function previewUrl(id: string, port: number) {
-  const sb = await ensureStarted(id);
+/** A local port on this Mac that tunnels to `port` on the instance. */
+async function localPort(id: string, port: number): Promise<number> {
+  await ensureStarted(id);
   touch(id);
-  const cred = await sb.createConnectToken({ port });
-  return withToken(cred.url, cred.token);
+  return forwardPort(getWorkspace(id).instance_id!, port);
 }
 
-function withToken(base: string, token: string, pathAndQuery = "") {
-  const u = new URL(pathAndQuery || "/", base);
-  u.searchParams.set("_modal_connect_token", token);
-  return u.toString();
+export async function previewUrl(id: string, port: number) {
+  return `http://127.0.0.1:${await localPort(id, port)}/`;
 }
 
 export async function terminalUrl(id: string) {
-  const sb = await ensureStarted(id);
-  await run(sb, `pgrep -x ttyd >/dev/null || (cd ${WORKSPACE_ROOT} && nohup ttyd -p ${TERMINAL_PORT} -W bash >/tmp/ttyd.log 2>&1 &)`);
-  await new Promise((r) => setTimeout(r, 500));
+  const r = await ensureStarted(id);
+  await run(r, `pgrep -x ttyd >/dev/null || (cd ${WORKSPACE_ROOT} && nohup ttyd -p ${TERMINAL_PORT} -W bash >/tmp/ttyd.log 2>&1 &)`);
+  await new Promise((res) => setTimeout(res, 500));
   return previewUrl(id, TERMINAL_PORT);
 }
 
 export async function startDesktop(id: string) {
-  const sb = await ensureStarted(id);
+  const r = await ensureStarted(id);
   await run(
-    sb,
+    r,
     [
       `pgrep -x Xvfb >/dev/null || (nohup Xvfb :0 -screen 0 1280x800x24 >/tmp/xvfb.log 2>&1 &)`,
       `sleep 1`,
@@ -465,24 +506,20 @@ export async function startDesktop(id: string) {
     // Checks use exact process names or the port: `pgrep -f` would match this shell's own
     // command line, which names every process it is about to start.
   );
-  touch(id);
-  // The noVNC client runs in the app (see /desktop/[id]); only its websocket goes to the
-  // sandbox. Modal's proxy reads the token from the URL, and the browser doesn't carry it to
-  // the sub-resources of a page served from the sandbox, so serving vnc.html there can't work.
-  const cred = await sb.createConnectToken({ port: VNC_PORT });
-  return withToken(cred.url.replace(/^http/, "ws"), cred.token, "/websockify");
+  // The noVNC client runs in the app (see /desktop/[id]); only its websocket goes to the instance.
+  return `ws://127.0.0.1:${await localPort(id, VNC_PORT)}/websockify`;
 }
 
 export async function stopDesktop(id: string) {
-  const sb = await workspaceSandbox(id);
-  await run(sb, `pkill -f "[w]ebsockify --we[b]"; pkill -x x11vnc; pkill -x xfce4-session; pkill -x Xvfb; true`);
+  const r = await workspaceRemote(id);
+  await run(r, `pkill -f "[w]ebsockify --we[b]"; pkill -x x11vnc; pkill -x xfce4-session; pkill -x Xvfb; true`);
 }
 
 export async function diff(id: string) {
-  const sb = await ensureStarted(id);
+  const r = await ensureStarted(id);
   touch(id);
   const out = await run(
-    sb,
+    r,
     `cd ${WORKSPACE_ROOT} && for d in */.git; do r=\${d%/.git}; git -C "$r" diff HEAD --no-color --src-prefix="a/$r/" --dst-prefix="b/$r/"; git -C "$r" ls-files --others --exclude-standard | sed "s#^#?? $r/#"; done`,
     { timeout: 120 },
   );

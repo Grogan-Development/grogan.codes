@@ -4,7 +4,7 @@ import { useState } from "react";
 import { api, ApiError, type RepoRisk } from "@/lib/api";
 import { Button, Input, Modal } from "./ui";
 
-/** Deleting checks the sandbox for uncommitted, unpushed or stashed work first. */
+/** Deleting checks the instance for uncommitted, unpushed or stashed work first. */
 export function DeleteWorkspace({ id, name, onDone, onClose }: { id: string; name: string; onDone: () => void; onClose: () => void }) {
   const [phase, setPhase] = useState<"confirm" | "checking" | "risky" | "deleting">("confirm");
   const [risks, setRisks] = useState<RepoRisk[]>([]);
@@ -32,7 +32,7 @@ export function DeleteWorkspace({ id, name, onDone, onClose }: { id: string; nam
     <Modal title={`Delete ${name}`} onClose={onClose}>
       {phase === "confirm" && (
         <div className="space-y-3">
-          <p>This permanently deletes the sandbox and everything on its disk. grogan.codes checks for work that isn&apos;t pushed first.</p>
+          <p>This terminates the instance and permanently deletes its disk. grogan.codes checks for work that isn&apos;t pushed first.</p>
           <div className="flex justify-end gap-2">
             <Button onClick={onClose}>Cancel</Button>
             <Button variant="danger" onClick={() => attempt(false)}>
@@ -47,7 +47,7 @@ export function DeleteWorkspace({ id, name, onDone, onClose }: { id: string; nam
           {error && <p className="text-bad">{error}</p>}
           {risks.length > 0 && (
             <>
-              <p className="text-warn">This work only exists in the sandbox and will be lost:</p>
+              <p className="text-warn">This work only exists on the instance’s disk and will be lost:</p>
               <div className="space-y-2 max-h-72 overflow-y-auto">
                 {risks.map((r) => (
                   <div key={r.repo} className="rounded-md border border-line p-2">

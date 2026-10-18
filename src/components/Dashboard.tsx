@@ -1,16 +1,25 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
-import { api, CPU_STEPS, DISK_GB_STEPS, diskUse, machineLabel, MEMORY_GB_STEPS, timeAgo, type Thread, type Workspace } from "@/lib/api";
-import { Dial } from "./Dial";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import type { AwsStatus } from "@/server/aws/config";
+import { api, diskUse, dollars, gpuShare, machineLabel, timeAgo, type MachinesInfo, type Market, type Thread, type Workspace } from "@/lib/api";
+import { estimate, InstancePicker } from "./InstancePicker";
 import { ThreadSquares } from "./ThreadSquares";
 import type { PermissionEvent } from "./composer/model";
-import { Button, Icon, Input, Logo, Modal, Segmented, StateDot } from "./ui";
+import { Button, Icon, Input, Logo, MarketTag, Modal, Segmented, StateDot } from "./ui";
 import { LoadoutPicker } from "./LoadoutPicker";
 import { DeleteWorkspace } from "./DeleteFlow";
 
-type Settings = { modal: boolean; claude: boolean; github: boolean };
+type Settings = {
+  aws: AwsStatus & { infra: { ok: boolean; missing: string[]; error?: string } };
+  claude: boolean;
+  github: boolean;
+  ssmPlugin: boolean;
+};
+
+/** AWS is usable only with working credentials, the infra stack in the region, and the SSM plugin. */
+const awsReady = (s: Settings) => s.aws.ok && s.aws.infra.ok && s.ssmPlugin;
 type Attention = { thread: Thread & { workspace_name: string }; pending: PermissionEvent[] };
 
 export function Dashboard() {
@@ -31,7 +40,7 @@ export function Dashboard() {
     load();
     api<Settings>("/api/settings").then((s) => {
       setSettings(s);
-      if (!s.modal || !s.claude) setSettingsOpen(true);
+      if (!awsReady(s) || !s.claude) setSettingsOpen(true);
     });
     const t = setInterval(load, 4000);
     return () => clearInterval(t);
@@ -52,10 +61,16 @@ export function Dashboard() {
         <div className="ml-auto flex items-center gap-3.5 text-xs text-muted">
           {settings && (
             <button onClick={() => setSettingsOpen(true)} className="flex gap-3.5 hover:text-text" title="Settings">
-              {(["modal", "claude", "github"] as const).map((k) => (
-                <span key={k} className="flex items-center gap-1.5 capitalize">
-                  <span className={`size-[7px] rounded-full ${settings[k] ? "bg-ok" : "bg-bad"}`} />
-                  {k === "github" ? "GitHub" : k}
+              {(
+                [
+                  ["AWS", awsReady(settings)],
+                  ["Claude", settings.claude],
+                  ["GitHub", settings.github],
+                ] as const
+              ).map(([k, ok]) => (
+                <span key={k} className="flex items-center gap-1.5">
+                  <span className={`size-[7px] rounded-full ${ok ? "bg-ok" : "bg-bad"}`} />
+                  {k}
                 </span>
               ))}
             </button>
@@ -116,7 +131,7 @@ export function Dashboard() {
               <div className="hidden grid-cols-[minmax(0,2.2fr)_minmax(0,2.6fr)_minmax(0,1.2fr)_96px_32px] gap-5 border-t border-line px-5 py-2 md:grid">
                 <span className="label">Workspace</span>
                 <span className="label">Threads</span>
-                <span className="label">CPU · RAM · disk</span>
+                <span className="label">Instance · disk</span>
               </div>
               {shown.map((w) => (
                 <WorkspaceRow key={w.id} w={w} onAct={act} onDelete={() => setDeleting(w)} />
@@ -160,12 +175,24 @@ function WorkspaceRow({ w, onAct, onDelete }: { w: Workspace; onAct: (id: string
         )}
       </div>
       <div className="flex min-w-0 flex-col gap-1.5 text-xs">
-        <span className={`font-mono ${live ? "text-text-2" : "text-faint"}`}>{machineLabel(w)}</span>
-        {w.gpu && (
-          <span className="flex">
-            <span className="rounded-md bg-[#2a2340] px-1.5 py-px font-mono text-[11px] font-semibold text-[#cdbbff]">{w.gpu.replace(/^([^:]+):(\d+)$/, "$2× $1").replace(/^([^:×]+)$/, "1× $1")}</span>
-          </span>
-        )}
+        <span className={`truncate font-mono ${live ? "text-text-2" : "text-faint"}`} title={machineLabel(w)}>
+          {w.instance_type ?? "no instance"}
+          {w.machine && !w.machine.gpu && (
+            <span className="text-faint">
+              {" "}
+              · {w.machine.vcpu} vCPU · {w.machine.memoryGib} GiB
+            </span>
+          )}
+        </span>
+        <span className="flex flex-wrap items-center gap-1.5">
+          {w.machine?.gpu && (
+            <span className="rounded-md bg-[#2a2340] px-1.5 py-px font-mono text-[11px] font-semibold text-[#cdbbff]">
+              {gpuShare(w.machine.gpu)} {w.machine.gpu.vramGb} GB
+            </span>
+          )}
+          {w.market && <MarketTag market={w.market} />}
+          {w.region && <span className="font-mono text-[11px] text-faint">{w.region}</span>}
+        </span>
         <DiskBar w={w} />
       </div>
       {live ? (
@@ -173,7 +200,7 @@ function WorkspaceRow({ w, onAct, onDelete }: { w: Workspace; onAct: (id: string
           Open
         </Link>
       ) : (
-        <Button className="w-24 justify-center" onClick={() => onAct(w.id, "start")} disabled={/ing$/.test(w.state)}>
+        <Button className="w-24 justify-center" onClick={() => onAct(w.id, "start")} disabled={/ing$/.test(w.state) || !w.instance_type}>
           <Icon name="play" size={12} />
           Start
         </Button>
@@ -185,7 +212,7 @@ function WorkspaceRow({ w, onAct, onDelete }: { w: Workspace; onAct: (id: string
   );
 }
 
-/** Disk quota use; amber past 80%, red past 95%. Modal can't cap disk, so this is the only guard. */
+/** Root volume use; amber past 80%, red past 95%. A full disk breaks git and Claude, so it shows early. */
 function DiskBar({ w }: { w: Workspace }) {
   const use = diskUse(w);
   if (use === null) return null;
@@ -251,21 +278,33 @@ function AttentionCard({ a, onDone }: { a: Attention; onDone: () => void }) {
   );
 }
 
-const GPUS = ["T4", "L4", "A10G", "L40S", "A100", "A100-80GB", "H100", "H200", "B200"];
-
 function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const [name, setName] = useState("");
   const [repos, setRepos] = useState<string[]>([]);
   const [repoDraft, setRepoDraft] = useState("");
-  const [cpu, setCpu] = useState(4);
-  const [memoryGb, setMemoryGb] = useState(8);
-  const [diskGb, setDiskGb] = useState(50);
-  const [gpu, setGpu] = useState("");
-  const [gpuCount, setGpuCount] = useState(1);
+  const [info, setInfo] = useState<MachinesInfo | null>(null);
+  const [infoError, setInfoError] = useState("");
+  const [type, setType] = useState("");
+  const [market, setMarket] = useState<Market>("on-demand");
+  const [diskGb, setDiskGb] = useState(0);
   const [idle, setIdle] = useState(30);
   const [loadout, setLoadout] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api<MachinesInfo>("/api/machines")
+      .then((i) => {
+        setInfo(i);
+        setType(i.defaultType);
+        setDiskGb(i.defaultDiskGb);
+      })
+      .catch((e) => setInfoError(String(e instanceof Error ? e.message : e)));
+  }, []);
+
+  const selected = info?.machines.find((m) => m.type === type);
+  const cost = selected && info ? estimate(selected, market, diskGb, info.spot) : null;
+  const ready = !!name.trim() && !!selected && !busy;
 
   const addRepo = () => {
     const r = repoDraft.trim().replace(/,$/, "");
@@ -280,7 +319,7 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
       const all = repoDraft.trim() ? [...repos, repoDraft.trim()] : repos;
       await api("/api/workspaces", {
         method: "POST",
-        json: { name, machine: { cpu, memoryGb, diskGb }, gpu: gpu ? (gpuCount > 1 ? `${gpu}:${gpuCount}` : gpu) : null, idleMinutes: idle, repos: all, loadout },
+        json: { name, instanceType: type, market, diskGb, idleMinutes: idle, repos: all, loadout },
       });
       onCreated();
     } catch (e) {
@@ -289,26 +328,19 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
     }
   };
 
-  const machine = `${cpu} CPU · ${memoryGb} GB · ${diskGb} GB${gpu ? ` + ${gpuCount}× ${gpu}` : ""}`;
-  const QUICK = [
-    { label: "Small", cpu: 1, memoryGb: 1, diskGb: 10 },
-    { label: "Medium", cpu: 2, memoryGb: 4, diskGb: 20 },
-    { label: "Large", cpu: 4, memoryGb: 8, diskGb: 50 },
-  ];
-
   return (
     <Modal title="New workspace" onClose={onClose} wide>
       <form
         className="flex flex-col gap-6"
         onSubmit={(e) => {
           e.preventDefault();
-          if (name.trim() && !busy) void create();
+          if (ready) void create();
         }}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && name.trim() && !busy) void create();
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && ready) void create();
         }}
       >
-        <div className="grid gap-8 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
+        <div className="grid gap-8 md:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
           <div className="flex flex-col gap-5">
             <label className="flex flex-col gap-2">
               <span className="text-xs font-semibold text-text-2">Name</span>
@@ -356,76 +388,9 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
               <span className="text-xs font-semibold text-text-2">Loadout</span>
               <LoadoutPicker value={loadout} onChange={setLoadout} />
             </div>
-          </div>
-
-          <div className="flex flex-col gap-5">
-            <div className="flex flex-col gap-2.5">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold text-text-2">Machine</span>
-                <div role="group" aria-label="Quick sizes" className="ml-auto flex gap-1">
-                  {QUICK.map((q) => {
-                    const on = q.cpu === cpu && q.memoryGb === memoryGb && q.diskGb === diskGb;
-                    return (
-                      <button
-                        key={q.label}
-                        type="button"
-                        aria-pressed={on}
-                        onClick={() => (setCpu(q.cpu), setMemoryGb(q.memoryGb), setDiskGb(q.diskGb))}
-                        className={`h-[26px] rounded-full border px-2.5 text-xs font-medium ${on ? "border-text bg-text text-bg" : "border-line-2 text-muted hover:text-text"}`}
-                      >
-                        {q.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              <div className="grid grid-cols-3 gap-2">
-                <Dial label="CPU" unit="cores" steps={CPU_STEPS} value={cpu} onChange={setCpu} />
-                <Dial label="Memory" unit="GB RAM" steps={MEMORY_GB_STEPS} value={memoryGb} onChange={setMemoryGb} />
-                <Dial label="Disk" unit="GB" steps={DISK_GB_STEPS} value={diskGb} onChange={setDiskGb} color="var(--info)" />
-              </div>
-            </div>
 
             <div className="flex flex-col gap-2">
-              <span className="text-xs font-semibold text-text-2">GPU</span>
-              <div role="radiogroup" aria-label="GPU" className="grid grid-cols-5 gap-1.5">
-                {["", ...GPUS].map((g) => {
-                  const on = gpu === g;
-                  return (
-                    <button
-                      key={g || "none"}
-                      type="button"
-                      role="radio"
-                      aria-checked={on}
-                      onClick={() => setGpu(g)}
-                      className={`h-[34px] truncate rounded-lg border px-1 text-xs font-semibold ${
-                        on ? (g ? "border-gpu bg-[#2a2340] text-text" : "border-faint bg-[#2a2d27] text-text") : `border-line-2 bg-panel-2 hover:border-faint ${g ? "text-text-2" : "text-muted"}`
-                      }`}
-                    >
-                      {g ? g.replace("-80GB", " 80G") : "None"}
-                    </button>
-                  );
-                })}
-              </div>
-              {gpu && (
-                <div className="flex flex-wrap items-center gap-2.5 rounded-[10px] border border-[#3a3158] bg-[#13111b] px-2.5 py-2">
-                  <div className="flex items-center rounded-[9px] border border-[#2a2540] bg-bg p-0.5">
-                    <button type="button" aria-label="Fewer GPUs" onClick={() => setGpuCount(Math.max(1, gpuCount - 1))} className="size-[30px] rounded-[7px] text-base hover:bg-[#2a2d27]">
-                      −
-                    </button>
-                    <span className="min-w-14 text-center font-mono text-[13px]">
-                      {gpuCount} {gpuCount === 1 ? "GPU" : "GPUs"}
-                    </span>
-                    <button type="button" aria-label="More GPUs" onClick={() => setGpuCount(Math.min(8, gpuCount + 1))} className="size-[30px] rounded-[7px] text-base hover:bg-[#2a2d27]">
-                      +
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="flex flex-col gap-2">
-              <span className="text-xs font-semibold text-text-2">Snapshot and stop when idle for</span>
+              <span className="text-xs font-semibold text-text-2">Stop when idle for</span>
               <Segmented
                 stretch
                 label="Idle timeout"
@@ -434,27 +399,85 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
                 className="h-9 [&>button]:h-full"
                 options={[10, 15, 30, 60, 120].map((m) => ({ value: m, label: m < 60 ? `${m}m` : `${m / 60}h` }))}
               />
-              {gpu ? (
-                <div className="flex gap-2.5 rounded-[10px] border border-[#5a4a26] bg-[#1a170f] px-3 py-2.5 text-xs leading-relaxed text-[#e8d3a6]">
-                  <span className="flex size-[18px] shrink-0 items-center justify-center rounded-md bg-warn text-[11px] font-bold text-bg">!</span>
-                  GPU sandboxes can’t take memory snapshots. grogan.codes saves your files before it stops one, but running processes end.
-                </div>
-              ) : null}
+              <span className="text-xs text-faint">Activity is you using the app or a Claude turn running. Files are kept when it stops.</span>
             </div>
+          </div>
+
+          <div className="flex flex-col gap-5">
+            {infoError ? (
+              <p className="text-xs text-bad">Couldn’t load instance types: {infoError}</p>
+            ) : !info ? (
+              <p className="text-xs text-muted">Loading instance types…</p>
+            ) : (
+              <InstancePicker info={info} value={type} market={market} onChange={setType} />
+            )}
+
+            <div className="flex flex-col gap-2">
+              <span className="text-xs font-semibold text-text-2">Market</span>
+              <Segmented
+                stretch
+                label="Market"
+                value={market}
+                onChange={setMarket}
+                className="h-9 [&>button]:h-full"
+                options={[
+                  { value: "on-demand", label: "On-demand" },
+                  {
+                    value: "spot",
+                    label:
+                      selected && info?.spot[selected.type] ? `Spot · −${Math.max(0, Math.round((1 - info.spot[selected.type] / selected.onDemandHr) * 100))}%` : "Spot",
+                  },
+                ]}
+              />
+              {market === "spot" ? (
+                <span className="text-xs leading-relaxed text-muted">
+                  Spare capacity at a discount. AWS can reclaim the instance with 2 minutes’ notice. The disk is kept, and CPU types resume from hibernation when you start them
+                  again; GPU types come back from a plain stop.
+                </span>
+              ) : (
+                <span className="text-xs text-faint">Full price. Runs until you or the idle timeout stop it.</span>
+              )}
+            </div>
+
+            {info && (
+              <div className="flex flex-col gap-2">
+                <span className="text-xs font-semibold text-text-2">Disk</span>
+                <Segmented
+                  stretch
+                  label="Disk size"
+                  value={diskGb}
+                  onChange={setDiskGb}
+                  className="h-9 [&>button]:h-full"
+                  options={info.diskSteps.map((g) => ({ value: g, label: `${g} GB` }))}
+                />
+                <span className="text-xs text-faint">
+                  Encrypted gp3, kept while the workspace exists, running or stopped.
+                  {selected?.hibernate && ` Hibernation adds ${Math.ceil(selected.memoryGib)} GiB on top for RAM.`}
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
         {error && <p className="text-bad">{error}</p>}
         <div className="-mx-6 flex flex-wrap items-center gap-3 border-t border-line px-6 pt-4">
-          <span className="text-[13px] text-muted">
+          <span className="flex flex-col text-[13px] text-muted">
             <span className="font-mono text-text">
-              {machine} · {repos.length + (repoDraft.trim() ? 1 : 0)} repos
+              {type || "…"} · {market} · {diskGb} GB · {repos.length + (repoDraft.trim() ? 1 : 0)} repos
             </span>
+            {cost && info && (
+              <span className="text-xs">
+                ≈ {cost.spotKnown ? "" : "≤ "}
+                {dollars(cost.totalHr)}/hr running · disk ≈ {dollars(cost.diskMonth)}/mo, also while stopped
+                {!cost.spotKnown && " · live spot price unavailable, showing on-demand"}
+                {info.region !== "us-east-1" && " · on-demand prices are us-east-1"}
+              </span>
+            )}
           </span>
           <Button type="button" variant="ghost" className="ml-auto" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="submit" variant="primary" disabled={!name.trim() || busy}>
+          <Button type="submit" variant="primary" disabled={!ready}>
             {busy ? "Creating…" : "Create workspace"}
             <span className="font-mono text-[11px] opacity-70">⌘↵</span>
           </Button>
@@ -464,35 +487,92 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
   );
 }
 
-function SettingsModal({ settings, onClose, onSaved }: { settings: Settings; onClose: () => void; onSaved: () => void }) {
-  const [modalId, setModalId] = useState("");
-  const [modalSecret, setModalSecret] = useState("");
+function StatusRow({ ok, label, children }: { ok: boolean; label: string; children: ReactNode }) {
+  return (
+    <div className="flex gap-2.5 text-xs">
+      <span className="pt-1">
+        <StateDot state={ok ? "ready" : "error"} />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="font-semibold text-text-2">{label}</div>
+        <div className="break-words text-muted">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsModal({ settings, onClose, onSaved }: { settings: Settings; onClose: () => void; onSaved: () => Promise<unknown> }) {
+  const [profile, setProfile] = useState(settings.aws.profile ?? "");
+  const [region, setRegion] = useState(settings.aws.region);
   const [claudeToken, setClaudeToken] = useState("");
   const [error, setError] = useState("");
-  const [saved, setSaved] = useState(false);
+  const [phase, setPhase] = useState<"idle" | "saving" | "saved">("idle");
+  const { aws, ssmPlugin } = settings;
+  const code = "rounded bg-panel-3 px-1 font-mono text-text-2";
+
   return (
     <Modal title="Settings" onClose={onClose}>
       <div className="flex flex-col gap-5">
-        <p className="text-xs text-muted">Stored in your macOS Keychain (service “codespace”). Never written to a sandbox&apos;s disk.</p>
         <div className="flex flex-col gap-2">
-          <span className="flex items-center gap-2 text-[13px] font-semibold">
-            <StateDot state={settings.modal ? "ready" : "error"} /> Modal token
-          </span>
-          <div className="flex gap-2">
-            <Input aria-label="Modal token ID" value={modalId} onChange={(e) => setModalId(e.target.value)} placeholder={settings.modal ? "•••• saved" : "ak-…"} className="w-full" />
-            <Input aria-label="Modal token secret" type="password" value={modalSecret} onChange={(e) => setModalSecret(e.target.value)} placeholder={settings.modal ? "•••• saved" : "as-…"} className="w-full" />
+          <span className="text-[13px] font-semibold">AWS</span>
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2">
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-muted">Profile</span>
+              <Input value={profile} onChange={(e) => setProfile(e.target.value)} placeholder="default chain" className="w-full font-mono" />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-muted">Region</span>
+              <Input value={region} onChange={(e) => setRegion(e.target.value)} placeholder="us-east-1" className="w-full font-mono" />
+            </label>
           </div>
           <span className="text-xs text-faint">
-            modal.com → Settings → API tokens. Leave empty to use <code className="font-mono">~/.modal.toml</code> from <code className="font-mono">modal setup</code>.
+            A profile from <code className="font-mono">~/.aws/config</code>; SSO profiles work after <code className="font-mono">aws sso login</code>. Empty uses the default credential
+            chain.
           </span>
         </div>
+
+        <div className="flex flex-col gap-3 rounded-[10px] border border-line bg-panel-2 p-3">
+          <StatusRow ok={aws.ok} label="Credentials">
+            {aws.ok ? (
+              <>
+                Account <span className="font-mono text-text-2">{aws.account}</span> · <span className="font-mono">{aws.arn}</span>
+              </>
+            ) : (
+              aws.error || "No credentials found."
+            )}
+          </StatusRow>
+          <StatusRow ok={aws.infra.ok} label={`Infra stack in ${aws.region}`}>
+            {aws.infra.ok ? (
+              "Deployed."
+            ) : (
+              <>
+                Deploy <code className={code}>infra/</code> in {aws.region} (see infra/README.md).
+                {aws.infra.missing.length > 0 && (
+                  <span className="mt-1 block font-mono text-[11px] text-faint">Missing: {aws.infra.missing.join(", ")}</span>
+                )}
+                {aws.infra.error && <span className="mt-1 block text-faint">{aws.infra.error}</span>}
+              </>
+            )}
+          </StatusRow>
+          <StatusRow ok={ssmPlugin} label="session-manager-plugin">
+            {ssmPlugin ? (
+              "Installed. The app reaches instances over SSM, with no open ports."
+            ) : (
+              <>
+                Install it on this Mac: <code className={code}>brew install --cask session-manager-plugin</code>
+              </>
+            )}
+          </StatusRow>
+        </div>
+
         <label className="flex flex-col gap-2">
           <span className="flex items-center gap-2 text-[13px] font-semibold">
             <StateDot state={settings.claude ? "ready" : "error"} /> Claude subscription token
           </span>
           <Input type="password" value={claudeToken} onChange={(e) => setClaudeToken(e.target.value)} placeholder={settings.claude ? "•••• saved" : "sk-ant-oat01-…"} className="w-full" />
           <span className="text-xs text-faint">
-            Run <code className="font-mono">claude setup-token</code> in a terminal and paste the result.
+            Run <code className="font-mono">claude setup-token</code> in a terminal and paste the result. Stored in your macOS Keychain (service “codespace”) and passed to Claude
+            over SSH, never written to an instance&apos;s disk.
           </span>
         </label>
         <div className="flex items-center gap-2 text-xs">
@@ -501,25 +581,27 @@ function SettingsModal({ settings, onClose, onSaved }: { settings: Settings; onC
         </div>
         <div className="flex items-center justify-end gap-2">
           {error && <span className="text-xs text-bad">{error}</span>}
-          {saved && <span className="text-xs text-ok">Saved</span>}
+          {phase === "saving" && <span className="text-xs text-muted">Saving and checking…</span>}
+          {phase === "saved" && <span className="text-xs text-ok">Saved</span>}
           <Button variant="ghost" onClick={onClose}>
             Close
           </Button>
           <Button
             variant="primary"
+            disabled={phase === "saving"}
             onClick={async () => {
               setError("");
+              setPhase("saving");
               try {
-                await api("/api/settings", { method: "POST", json: { modalTokenId: modalId, modalTokenSecret: modalSecret, claudeToken } });
+                await api("/api/settings", { method: "POST", json: { awsProfile: profile, awsRegion: region, claudeToken } });
+                await onSaved();
               } catch (e) {
                 setError(String(e instanceof Error ? e.message : e));
+                setPhase("idle");
                 return;
               }
-              setModalId("");
-              setModalSecret("");
               setClaudeToken("");
-              setSaved(true);
-              onSaved();
+              setPhase("saved");
             }}
           >
             Save

@@ -1,4 +1,5 @@
-import { createWorkspace, listRepos, listWorkspaces, SIZES, type Machine, type Size } from "@/server/workspaces";
+import { createWorkspace, listRepos, listWorkspaces, workspaceJson } from "@/server/workspaces";
+import { DEFAULT_DISK_GB, DEFAULT_MACHINE, type Market } from "@/server/aws/machines";
 import { listThreads } from "@/server/threads";
 import { handle, json } from "@/server/http";
 
@@ -11,7 +12,7 @@ export const GET = handle(async () => {
       const recent = [...threads].sort((a, b) => b.updated_at - a.updated_at);
       const latest = recent[0];
       return {
-        ...w,
+        ...workspaceJson(w),
         repos: listRepos(w.id),
         activity: {
           waiting: threads.filter((t) => t.status === "waiting").length,
@@ -31,17 +32,26 @@ export const GET = handle(async () => {
 export const POST = handle(async (req: Request) => {
   const body = (await req.json()) as {
     name: string;
-    size?: Size;
-    machine?: Machine;
-    gpu?: string | null;
+    instanceType?: string;
+    market?: Market;
+    diskGb?: number;
     idleMinutes?: number;
     repos?: string[];
     loadout?: string[];
   };
   const name = body.name?.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-");
   if (!name) return json({ error: "Name is required" }, 400);
-  const size = body.size && body.size in SIZES ? body.size : "large";
   return json(
-    createWorkspace({ name, size, machine: body.machine, gpu: body.gpu ?? null, idleMinutes: body.idleMinutes ?? 30, repos: body.repos ?? [], loadout: body.loadout ?? [] }),
+    workspaceJson(
+      createWorkspace({
+        name,
+        instanceType: body.instanceType ?? DEFAULT_MACHINE,
+        market: body.market ?? "on-demand",
+        diskGb: body.diskGb ?? DEFAULT_DISK_GB,
+        idleMinutes: body.idleMinutes ?? 30,
+        repos: body.repos ?? [],
+        loadout: body.loadout ?? [],
+      }),
+    ),
   );
 });

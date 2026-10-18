@@ -96,6 +96,16 @@ export function StateDot({ state }: { state: string }) {
   );
 }
 
+/** "spot" as an amber badge, since AWS can reclaim it; on-demand is the quiet default. */
+export function MarketTag({ market }: { market: string }) {
+  if (market !== "spot") return <span className="text-[11px] text-faint">on-demand</span>;
+  return (
+    <span title="Spot: AWS can reclaim it with 2 minutes' notice. The disk is kept." className="rounded-md bg-warn/15 px-1.5 py-px text-[11px] font-semibold text-warn">
+      spot
+    </span>
+  );
+}
+
 export function Logo() {
   return (
     <Link href="/" aria-label="All workspaces" className="flex size-7 items-center justify-center rounded-[7px] bg-accent text-[13px] font-bold text-bg">

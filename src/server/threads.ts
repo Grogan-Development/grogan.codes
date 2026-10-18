@@ -9,8 +9,8 @@ import {
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { db, now } from "./db";
-import { WORKSPACE_ROOT } from "./modal";
-import { spawnInSandbox } from "./transport";
+import { WORKSPACE_ROOT } from "./remote";
+import { spawnRemote } from "./transport";
 import { getSecret } from "./secrets";
 import { ensureStarted, getWorkspace, touch } from "./workspaces";
 import { applyLoadout, loadoutHash, loadoutMcpServers } from "./catalog";
@@ -193,13 +193,13 @@ export class Runner {
     const thread = this.thread;
     const ws = getWorkspace(thread.workspace_id);
     this.setStatus("starting", "waking workspace");
-    const sb = await ensureStarted(ws.id);
+    const r = await ensureStarted(ws.id);
 
     const loadout: string[] = JSON.parse(ws.loadout);
     const hash = loadoutHash(loadout);
     if (hash !== ws.loadout_applied_hash) {
       this.setStatus("starting", "applying loadout");
-      await applyLoadout(sb, loadout, (text) => this.emit({ type: "cs_log", text }, false));
+      await applyLoadout(r, loadout, (text) => this.emit({ type: "cs_log", text }, false));
       db().prepare("UPDATE workspaces SET loadout_applied_hash = ? WHERE id = ?").run(hash, ws.id);
     }
 
@@ -224,7 +224,7 @@ export class Runner {
         pathToClaudeCodeExecutable: "claude",
         env: {},
         canUseTool: (toolName, input, opts) => this.askPermission(toolName, input, opts),
-        spawnClaudeCodeProcess: (o) => spawnInSandbox(sb, o, { CLAUDE_CODE_OAUTH_TOKEN: token, CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1" }),
+        spawnClaudeCodeProcess: (o) => spawnRemote(r, o, { CLAUDE_CODE_OAUTH_TOKEN: token, CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1" }),
       },
     });
     this.q = q;
@@ -265,10 +265,10 @@ export class Runner {
       }
       this.setStatus("idle");
     } catch (err) {
-      // Stopping a workspace terminates its sandbox and with it this Claude process;
+      // Stopping a workspace stops its instance and with it this Claude process;
       // that's expected, not an error. The next send resumes the session.
       const ws = getWorkspace(this.thread.workspace_id);
-      if (ws.state === "snapshotting" || ws.state === "stopped") this.setStatus("idle");
+      if (ws.state === "stopping" || ws.state === "stopped") this.setStatus("idle");
       else this.setStatus("error", err instanceof Error ? err.message : String(err));
     } finally {
       this.q = null;

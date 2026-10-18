@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api, ApiError, machineLabel, type RepoRisk, type Thread, type Workspace } from "@/lib/api";
-import { Button, Icon, Input, Logo, Spinner, StateDot } from "./ui";
+import { Button, Icon, Input, Logo, MarketTag, Spinner, StateDot } from "./ui";
 import { Composer } from "./composer/Composer";
 import { LoadoutPicker } from "./LoadoutPicker";
 import { DeleteWorkspace } from "./DeleteFlow";
@@ -72,15 +72,17 @@ export function WorkspaceView({ id }: { id: string }) {
     load();
   };
 
-  const act = async (action: "start" | "stop" | "setup") => {
+  const act = async (action: "start" | "pause" | "stop" | "setup") => {
     await api(`/api/workspaces/${id}/action`, { method: "POST", json: { action } });
     load();
   };
 
   if (!ws) return <div className="p-8 text-muted">{error || "Loading…"}</div>;
   const live = ws.state === "started";
-  // A stopped workspace still shows its threads; sending a message boots it from the snapshot.
+  // A stopped workspace still shows its threads; sending a message starts its instance again.
   const usable = live || ws.state === "stopped" || ws.state === "error";
+  // Rows from the Modal era have no instance to start; they can only be deleted.
+  const startable = !!ws.instance_type && ["stopped", "error"].includes(ws.state);
   const working = ws.threads.some((t) => ["running", "starting", "waiting"].includes(t.status));
   const activeThread = ws.threads.find((t) => t.id === active);
 
@@ -100,7 +102,13 @@ export function WorkspaceView({ id }: { id: string }) {
           <div className="flex h-8 items-center gap-2.5 rounded-full border border-line bg-panel-2 px-3 text-xs">
             <StateDot state={ws.state} />
             <span className="font-semibold capitalize">{ws.state}</span>
-            <span className={`font-mono ${ws.gpu ? "text-gpu" : "text-muted"}`}>{machineLabel(ws)}</span>
+            <span className={`font-mono ${ws.machine?.gpu ? "text-gpu" : "text-muted"}`}>{machineLabel(ws)}</span>
+            {ws.market && <MarketTag market={ws.market} />}
+            {ws.region && (
+              <span className="font-mono text-faint" title={ws.az ? `Availability zone ${ws.az}` : undefined}>
+                {ws.region}
+              </span>
+            )}
             {live && (
               <>
                 <span className="h-3.5 w-px bg-line-2" />
@@ -108,8 +116,18 @@ export function WorkspaceView({ id }: { id: string }) {
               </>
             )}
           </div>
-          {live ? (
-            <Button onClick={() => act("stop")} title="Snapshot files and stop the sandbox">
+          {live && ws.hibernate ? (
+            <>
+              <Button onClick={() => act("pause")} title="Hibernate: saves memory to disk and stops the instance. Running processes and files come back on start.">
+                <Icon name="stop" />
+                Hibernate <span className="text-muted">keeps memory</span>
+              </Button>
+              <Button variant="ghost" onClick={() => act("stop")} title="Stop the instance. Files are kept; running processes end.">
+                Stop
+              </Button>
+            </>
+          ) : live ? (
+            <Button onClick={() => act("stop")} title="Stop the instance. Files are kept; running processes end.">
               <Icon name="stop" />
               Stop
             </Button>
@@ -117,7 +135,7 @@ export function WorkspaceView({ id }: { id: string }) {
             <Button variant="primary" onClick={() => act("setup")}>
               Retry setup
             </Button>
-          ) : ["stopped", "error"].includes(ws.state) ? (
+          ) : startable ? (
             <Button variant="primary" onClick={() => act("start")}>
               <Icon name="play" size={12} />
               Start
@@ -382,7 +400,7 @@ function Repos({ ws, reload }: { ws: Full; reload: () => void }) {
 
 function IdleSetting({ ws, reload }: { ws: Full; reload: () => void }) {
   return (
-    <label className="flex items-center gap-2 border-t border-line px-4 py-2.5 text-xs text-muted" title="Snapshot the files and stop the sandbox after this long without activity">
+    <label className="flex items-center gap-2 border-t border-line px-4 py-2.5 text-xs text-muted" title="Stop the instance after this long without activity. Files are kept.">
       Stop after
       <select
         value={ws.idle_minutes}
@@ -403,12 +421,12 @@ function IdleSetting({ ws, reload }: { ws: Full; reload: () => void }) {
   );
 }
 
-/** Shown in place of a panel that needs a running sandbox, so opening the dock never boots one. */
+/** Shown in place of a panel that needs a running instance, so opening the dock never starts one. */
 function NeedsRunning({ ws, onStart }: { ws: Full; onStart: () => void }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
       <div className="text-[15px] font-semibold">Workspace is {ws.state}</div>
-      {["stopped", "error"].includes(ws.state) && (
+      {ws.instance_type && ["stopped", "error"].includes(ws.state) && (
         <Button variant="primary" onClick={onStart}>
           <Icon name="play" size={12} />
           Start
@@ -420,12 +438,14 @@ function NeedsRunning({ ws, onStart }: { ws: Full; onStart: () => void }) {
 
 function SidePanel({ ws, panel, reload, onStart }: { ws: Full; panel: Panel; reload: () => void; onStart: () => void }) {
   const live = ws.state === "started";
+  // Port forwards are rebuilt after a restart, so panels remount when the instance starts again.
+  const boot = `${ws.instance_id}:${ws.instance_started_at ?? ""}`;
   if (panel === "loadout") return <LoadoutPanel ws={ws} reload={reload} />;
   if (!live) return <NeedsRunning ws={ws} onStart={onStart} />;
-  if (panel === "diff") return <DiffPanel key={ws.sandbox_id} id={ws.id} />;
+  if (panel === "diff") return <DiffPanel key={boot} id={ws.id} />;
   if (panel === "terminal")
-    return <FramePanel key={ws.sandbox_id} header={<span>Terminal (ttyd)</span>} load={() => api<{ url: string }>(`/api/workspaces/${ws.id}/terminal`).then((r) => r.url)} />;
-  if (panel === "browser") return <BrowserPanel key={ws.sandbox_id} id={ws.id} />;
+    return <FramePanel key={boot} header={<span>Terminal (ttyd)</span>} load={() => api<{ url: string }>(`/api/workspaces/${ws.id}/terminal`).then((r) => r.url)} />;
+  if (panel === "browser") return <BrowserPanel key={boot} id={ws.id} />;
   return <PortsPanel id={ws.id} />;
 }
 

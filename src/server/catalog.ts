@@ -2,10 +2,9 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { Sandbox } from "modal";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { db } from "./db";
-import { HOME, mustRun, q, run } from "./modal";
+import { HOME, q, run, writeFile, type Remote } from "./remote";
 
 export type Kind = "plugin" | "mcp" | "skill" | "agent" | "command" | "workflow" | "memory";
 
@@ -167,7 +166,7 @@ export function loadoutHash(loadout: string[]) {
     .slice(0, 16);
 }
 
-/** MCP servers are handed to the SDK per thread rather than written into the sandbox. */
+/** MCP servers are handed to the SDK per thread rather than written onto the instance. */
 export function loadoutMcpServers(loadout: string[]): Record<string, McpServerConfig> {
   return Object.fromEntries(selected(loadout).filter((i) => i.kind === "mcp").map((i) => [i.name, JSON.parse(i.data)]));
 }
@@ -183,12 +182,12 @@ const DEST: Record<Exclude<Kind, "plugin" | "mcp">, (name: string) => string> = 
 const MANIFEST = `${HOME}/.claude/.codespace-manifest.json`;
 
 /**
- * Make the sandbox's ~/.claude match the loadout: files we placed before but that are
- * no longer selected are removed; files the user created inside the sandbox are untouched.
+ * Make the instance's ~/.claude match the loadout: files we placed before but that are
+ * no longer selected are removed; files the user created on the instance are untouched.
  */
-export async function applyLoadout(sb: Sandbox, loadout: string[], log: (line: string) => void = () => {}) {
+export async function applyLoadout(r: Remote, loadout: string[], log: (line: string) => void = () => {}) {
   const items = selected(loadout);
-  const previous: string[] = JSON.parse((await run(sb, `cat ${MANIFEST} 2>/dev/null || echo '[]'`)).output || "[]");
+  const previous: string[] = JSON.parse((await run(r, `cat ${MANIFEST} 2>/dev/null || echo '[]'`)).output || "[]");
   const placed: string[] = [];
 
   for (const item of items) {
@@ -197,41 +196,40 @@ export async function applyLoadout(sb: Sandbox, loadout: string[], log: (line: s
     const dest = DEST[item.kind](item.name);
     for (const f of files) {
       const target = `${dest}/${f.rel}`;
-      await mustRun(sb, `mkdir -p ${q(path.posix.dirname(target))}`);
-      await sb.filesystem.writeBytes(Buffer.from(f.content, "base64"), target);
+      await writeFile(r, target, Buffer.from(f.content, "base64"));
       placed.push(target);
     }
     log(`placed ${item.kind} ${item.name}`);
   }
 
   const stale = previous.filter((p) => !placed.includes(p));
-  if (stale.length) await run(sb, `rm -f ${stale.map(q).join(" ")}`);
+  if (stale.length) await run(r, `rm -f ${stale.map(q).join(" ")}`);
 
   const plugins = items.filter((i) => i.kind === "plugin").map((i) => JSON.parse(i.data) as PluginData);
   const marketplaces = new Map(plugins.map((p) => [p.marketplace, p.source]));
   for (const [name, source] of marketplaces) {
     const ref = source.repo ?? source.url;
     if (!ref) continue;
-    const r = await run(sb, `claude plugin marketplace list 2>/dev/null | grep -q ${q(name)} || claude plugin marketplace add ${q(ref)}`, { timeout: 300 });
-    log(`marketplace ${name}: ${r.exitCode === 0 ? "ok" : r.output.slice(-300)}`);
+    const res = await run(r, `claude plugin marketplace list 2>/dev/null | grep -q ${q(name)} || claude plugin marketplace add ${q(ref)}`, { timeout: 300 });
+    log(`marketplace ${name}: ${res.exitCode === 0 ? "ok" : res.output.slice(-300)}`);
   }
   const wanted = new Set(plugins.map((p) => `${p.plugin}@${p.marketplace}`));
-  const installedOut = (await run(sb, `claude plugin list --json 2>/dev/null || echo []`)).output;
+  const installedOut = (await run(r, `claude plugin list --json 2>/dev/null || echo []`)).output;
   let installed: string[] = [];
   try {
     installed = (JSON.parse(installedOut) as { id?: string; name?: string }[]).map((p) => p.id ?? p.name ?? "");
   } catch {}
   for (const id of wanted) {
     if (installed.includes(id)) continue;
-    const r = await run(sb, `claude plugin install ${q(id)}`, { timeout: 300 });
-    log(`plugin ${id}: ${r.exitCode === 0 ? "installed" : r.output.slice(-300)}`);
+    const res = await run(r, `claude plugin install ${q(id)}`, { timeout: 300 });
+    log(`plugin ${id}: ${res.exitCode === 0 ? "installed" : res.output.slice(-300)}`);
   }
   for (const id of installed) {
     if (id && !wanted.has(id)) {
-      await run(sb, `claude plugin uninstall ${q(id)}`, { timeout: 120 });
+      await run(r, `claude plugin uninstall ${q(id)}`, { timeout: 120 });
       log(`plugin ${id}: removed`);
     }
   }
 
-  await sb.filesystem.writeText(JSON.stringify(placed), MANIFEST);
+  await writeFile(r, MANIFEST, JSON.stringify(placed));
 }

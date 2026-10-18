@@ -86,6 +86,19 @@ function migrate(d: DatabaseSync) {
   if (!cols.has("memory_mib")) d.exec("ALTER TABLE workspaces ADD COLUMN memory_mib INTEGER");
   if (!cols.has("disk_gb")) d.exec("ALTER TABLE workspaces ADD COLUMN disk_gb INTEGER");
   if (!cols.has("disk_used_mb")) d.exec("ALTER TABLE workspaces ADD COLUMN disk_used_mb INTEGER");
+  // EC2: one instance per workspace; its root volume is the disk (disk_gb is its real size).
+  const ec2Cols: [string, string][] = [
+    ["instance_id", "TEXT"],
+    ["instance_type", "TEXT"],
+    ["market", "TEXT"],
+    ["region", "TEXT"],
+    ["az", "TEXT"],
+    ["hibernate", "INTEGER NOT NULL DEFAULT 0"],
+    ["instance_started_at", "INTEGER"],
+  ];
+  for (const [name, type] of ec2Cols) if (!cols.has(name)) d.exec(`ALTER TABLE workspaces ADD COLUMN ${name} ${type}`);
+  d.exec(`UPDATE workspaces SET state = 'error', error = 'Created on Modal, which this version no longer supports. Delete it.'
+    WHERE instance_type IS NULL`);
 }
 
 /**
@@ -97,9 +110,9 @@ function recoverFromRestart(d: DatabaseSync) {
     UPDATE threads SET status = 'idle' WHERE status IN ('starting', 'running', 'waiting');
     UPDATE workspaces SET state = 'setup failed', error = 'Setup was interrupted by a server restart'
       WHERE state IN ('creating', 'setting up');
-    UPDATE workspaces SET state = 'error', error = 'Snapshot was interrupted by a server restart'
-      WHERE state = 'snapshotting';
   `);
+  // A leftover 'starting' or 'stopping' isn't an error: the instance kept going without us, and
+  // syncState reads its real state from EC2 the next time anyone looks.
 }
 
 export function now() {

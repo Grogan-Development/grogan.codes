@@ -1,3 +1,7 @@
+import { machineLabel as formatMachine, type Machine, type Market } from "@/server/aws/machines";
+
+export type { Machine, Market };
+
 export class ApiError extends Error {
   constructor(message: string, public status: number, public body: Record<string, unknown>) {
     super(message);
@@ -18,19 +22,24 @@ export async function api<T = unknown>(path: string, init?: RequestInit & { json
 export type Workspace = {
   id: string;
   name: string;
-  sandbox_id: string | null;
   state: string;
   error: string | null;
-  snapshot: string;
-  gpu: string | null;
-  cpu: number | null;
-  memory_mib: number | null;
+  instance_id: string | null;
+  instance_type: string | null;
+  market: Market | null;
+  region: string | null;
+  az: string | null;
+  /** 1 when the instance was launched with hibernation (every CPU type), so Pause keeps memory. */
+  hibernate: number | null;
+  instance_started_at?: number | null;
   disk_gb: number | null;
   disk_used_mb: number | null;
   idle_minutes: number;
   loadout: string;
   created_at: number;
   last_activity_at: number;
+  /** null for rows created on Modal, which have no instance type. */
+  machine: Machine | null;
   repos: Repo[];
   activity?: {
     waiting: number;
@@ -69,17 +78,35 @@ export function timeAgo(ts: number) {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-/** "4 CPU · 8 GB · 50 GB", from the dials; rows created before the dials show their size preset. */
-export function machineLabel(w: Pick<Workspace, "snapshot" | "cpu" | "memory_mib" | "disk_gb">) {
-  if (w.cpu == null || w.memory_mib == null) return w.snapshot.replace(/^daytona-(vm-)?/, "");
-  return `${w.cpu} CPU · ${w.memory_mib / 1024} GB${w.disk_gb ? ` · ${w.disk_gb} GB` : ""}`;
+/** "m8g.xlarge · 4 vCPU · 16 GiB"; Modal-era rows fall back to whatever type they have. */
+export function machineLabel(w: Pick<Workspace, "machine" | "instance_type">) {
+  return w.machine ? formatMachine(w.machine) : (w.instance_type ?? "unknown instance");
 }
 
-/** Fraction of the disk quota in use, or null when unknown. */
+const FRACTIONS: Record<number, string> = { 0.125: "⅛", 0.25: "¼", 0.5: "½" };
+
+/** "⅛ L4" for a partitioned GPU, "L4" for a whole one. */
+export function gpuShare(gpu: NonNullable<Machine["gpu"]>) {
+  if (!gpu.fraction) return gpu.name;
+  return `${FRACTIONS[gpu.fraction] ?? `${gpu.fraction * 8}/8`} ${gpu.name}`;
+}
+
+/** Fraction of the disk in use, or null when unknown. */
 export function diskUse(w: Pick<Workspace, "disk_gb" | "disk_used_mb">) {
   return w.disk_gb && w.disk_used_mb != null ? w.disk_used_mb / 1024 / w.disk_gb : null;
 }
 
-export const CPU_STEPS = [1, 2, 4, 6, 8, 12, 16, 24, 32];
-export const MEMORY_GB_STEPS = [1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128];
-export const DISK_GB_STEPS = [10, 20, 50, 100, 200, 500];
+/** "$0.18" or "$0.0336" for prices under ten cents, so cheap types don't all read "$0.03". */
+export function dollars(n: number) {
+  return `$${n < 0.1 ? n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : n.toFixed(2)}`;
+}
+
+/** GET /api/machines. `spot` is best-effort and empty when the price lookup fails. */
+export type MachinesInfo = {
+  machines: Machine[];
+  defaultType: string;
+  diskSteps: number[];
+  defaultDiskGb: number;
+  region: string;
+  spot: Record<string, number>;
+};

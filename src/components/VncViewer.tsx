@@ -5,7 +5,8 @@ import { api } from "@/lib/api";
 
 /**
  * The workspace's VNC desktop. The noVNC client is bundled with the app; it asks the server
- * to start the desktop and connects straight to the sandbox's token-gated websocket.
+ * to start the desktop, then connects to the websocket URL it returns: a local port forwarded
+ * over SSH to websockify on the instance.
  */
 export function VncViewer({ workspaceId }: { workspaceId: string }) {
   const screen = useRef<HTMLDivElement>(null);
