@@ -1,0 +1,170 @@
+# AWS cut-over plan (Modal → EC2)
+
+Branch `aws`. Codespace moves from Modal sandboxes to one EC2 instance per workspace. Modal is removed entirely.
+
+## Decisions
+
+- **One EC2 instance per workspace.** Its encrypted gp3 root EBS volume *is* the workspace disk. There are no filesystem snapshots, and there is no 24h lifetime cap.
+- **Pause** hibernates (keeps RAM) when the instance was launched with hibernation. That applies to every CPU type in `machines.ts`. **Stop** is a plain stop. GPU types can't hibernate, so for them both actions are a plain stop. Either way, files survive.
+- **Market per workspace**: `on-demand` or `spot`.
+  - Spot uses a *persistent* request with interruption behaviour `hibernate` (CPU) or `stop` (GPU). An interruption then behaves like a forced pause, and the disk survives.
+  - Deleting a spot workspace must cancel its spot request as well as terminate the instance.
+- **Reaching instances: SSH over AWS SSM Session Manager.**
+  - The Mac spawns `aws ssm start-session --target <id> --document-name AWS-StartSSHSession --parameters portNumber=22` and uses its stdio as the socket for the `ssh2` npm client.
+  - The client logs in as `root` with the app's ed25519 key (`src/server/aws/keys.ts`, which writes `.data/ssh/id_ed25519`).
+  - The security group has **no inbound rules**, and sshd listens on 127.0.0.1 only.
+  - The Mac needs the AWS CLI v2 and `session-manager-plugin`.
+- **Ports** (Terminal/ttyd 7681, VNC/websockify 6080, previews) are reached through ssh2 `forwardOut`, behind a local listener on `127.0.0.1:<port>`. Preview, terminal and desktop URLs become `http://127.0.0.1:<port>/...` / `ws://127.0.0.1:<port>/websockify`. Modal connect tokens go away.
+- **Infra as code: AWS CDK (TypeScript) in `infra/`**, with EC2 Image Builder for AMIs. The stack is regional. It publishes SSM parameters that the app reads (names in `src/server/aws/config.ts` → `PARAMS`).
+- **Per-workspace instances are created by the app at runtime** with `@aws-sdk/client-ec2`, never through IaC.
+- **Region** comes from Settings (default `us-east-1`). Each workspace records its region and availability zone. Spot launches choose an availability zone with `GetSpotPlacementScores` (SingleAvailabilityZone) and try the next zone on capacity errors.
+
+## Contract files (already written; don't change signatures without saying so in your report)
+
+| File | What it gives you |
+|---|---|
+| `src/server/aws/config.ts` | `awsRegion()`, `awsProfile()`, `clientConfig()`, `resetAws()`/`awsGeneration()` (rebuild cached clients when the generation changes), `checkAwsCredentials()`, `PARAMS`, `ImageVariant`, `TAG_APP`, `TAG_WORKSPACE` |
+| `src/server/aws/machines.ts` | `MACHINES`, `Machine`, `Market`, `MARKETS`, `machine(type)`, `machineLabel(m)`, `DEFAULT_MACHINE`, `DISK_GB_STEPS`, `DEFAULT_DISK_GB` |
+| `src/server/aws/keys.ts` | `sshPublicKey()`, `sshPrivateKey()` |
+| `src/server/remote.ts` | `HOME`, `WORKSPACE_ROOT`, `TERMINAL_PORT`, `VNC_PORT`, `PATH_PREFIX`, `q`, `Remote`, `RemoteProcess`, `ExecOptions`, `remote()`, `waitForRemote()`, `forgetRemote()`, `run()`, `mustRun()`, `forwardPort()` (stubs, implemented by the SSH work) |
+| `src/server/secrets.ts` | secret names are now `aws-profile`, `aws-region` and `claude-oauth-token` |
+
+## Server contract: `src/server/aws/ec2.ts` and `src/server/workspaces.ts`
+
+`ec2.ts` exports, besides whatever it needs internally:
+- `spotPrices(types: string[]): Promise<Record<string, number>>`: the lowest current spot price per type across the region's AZs, cached for about 5 minutes.
+- `infraStatus(): Promise<{ ok: boolean; missing: string[] }>`: whether the CDK stack's SSM parameters exist in the current region.
+
+`workspaces.ts` keeps its exported names: `listWorkspaces`, `getWorkspace`, `listRepos`, `createWorkspace`, `retrySetup`, `bootstrap`, `addRepo`, `unsavedWork`, `removeRepo`, `lifecycle`, `deleteWorkspace`, `setIdleMinutes`, `syncState`, `ensureStarted`, `touch`, `previewUrl`, `terminalUrl`, `startDesktop`, `stopDesktop`, `diff`, `SETUP_FAILED`, `parseRepo`. Also:
+- `ensureStarted(id)` and the renamed `workspaceRemote(id)` (was `workspaceSandbox`) return `Promise<Remote>`.
+- `createWorkspace({ name, instanceType, market, diskGb, idleMinutes, repos, loadout })`.
+
+DB columns on `workspaces`:
+- **New:** `instance_id`, `instance_type`, `market`, `region`, `az`, `hibernate` (0/1, whether it was launched with hibernation), `instance_started_at`.
+- **Kept:** `disk_gb`, which is now the real root volume size, and `disk_used_mb`.
+- **Legacy:** `sandbox_id`, `image_id`, `cpu`, `memory_mib` and `gpu` are no longer read. `snapshot` is NOT NULL, so write the instance type into it.
+- **Modal-era rows** (no `instance_type`) get state `error` with the message "Created on Modal, which this version no longer supports. Delete it."
+
+States: `creating`, `setting up`, `starting`, `started`, `stopping`, `stopped`, `error`, `setup failed`. (`snapshotting` is gone.) A spot interruption leaves state `stopped`, with `error` explaining that AWS reclaimed the capacity and files were kept.
+
+Workspace JSON returned by the API: the DB row (minus legacy columns) plus `machine: Machine`, plus the existing `repos`/`activity`/`threads`.
+
+`POST /api/workspaces` body: `{ name, instanceType, market, diskGb, idleMinutes, repos, loadout }`.
+
+`GET /api/machines` returns `{ machines: Machine[], defaultType, diskSteps, defaultDiskGb, region, spot: Record<type, number> }`. The `spot` field is best-effort: `{}` if the lookup fails.
+
+`GET /api/settings` returns `{ aws: AwsStatus & { infra: { ok, missing } }, claude: boolean, github: boolean, ssmPlugin: boolean }`. `POST` takes `{ awsProfile?, awsRegion?, claudeToken? }` and calls `resetAws()` when AWS settings change.
+
+Preview, terminal and desktop routes keep their response shapes (`{ url }`). Only the URL form changes.
+
+## IAM actions the app needs (the `infra/` stack creates a managed policy with these)
+
+- `sts:GetCallerIdentity`
+- **EC2:**
+  - `ec2:Describe*`, `ec2:GetSpotPlacementScores`, `ec2:DescribeSpotPriceHistory`
+  - `ec2:RunInstances` + `ec2:CreateTags` on create, conditioned on request tag `app=codespace` where the resource supports it
+  - `ec2:StartInstances`, `ec2:StopInstances`, `ec2:TerminateInstances`, `ec2:ModifyInstanceAttribute`, `ec2:CancelSpotInstanceRequests`, conditioned on resource tag `app=codespace`
+- `iam:PassRole` on the instance role
+- **SSM:**
+  - `ssm:GetParameter`, `ssm:GetParameters`, `ssm:GetParametersByPath` on `/codespace/*` and `/aws/service/*`
+  - `ssm:StartSession` on instances tagged `app=codespace` and on document `AWS-StartSSHSession`
+  - `ssm:TerminateSession`, `ssm:ResumeSession` on the caller's own sessions
+
+## Image contents (AMI built by Image Builder from `infra/image/setup.sh`)
+
+- **Base OS:**
+  - **CPU variants:** Ubuntu 22.04 LTS. It's on AWS's hibernation-supported list; 24.04 is not yet. Disable KASLR as AWS recommends for hibernation.
+  - **GPU variants:** the AWS Deep Learning Base OSS NVIDIA Driver AMI (Ubuntu 22.04), for x86_64 and arm64.
+- **sshd:**
+  - `ListenAddress 127.0.0.1`
+  - `PermitRootLogin prohibit-password`, `PasswordAuthentication no`
+  - `AcceptEnv CLAUDE_* CS_* MCP_* DISABLE_* ANTHROPIC_*`
+- **Boot behaviour:**
+  - amazon-ssm-agent enabled, and ec2-hibinit-agent present.
+  - Cloud-init user-data (written by the app at launch) appends the app's public key to `/root/.ssh/authorized_keys`.
+- **Tools:**
+  - Node LTS in `/usr/local/bin`, git, `gh`, ttyd 1.7.7
+  - Claude Code installed for root (`/root/.local/bin/claude`)
+  - ripgrep, python3, build-essential, tmux, jq, curl
+- **Desktop:**
+  - Xvfb, xfce4, x11vnc, novnc + websockify, at the paths `workspaces.ts` uses: `websockify --web /usr/share/novnc`, `startxfce4`.
+  - A non-snap Chromium or Chrome.
+- **Spot watcher:** a small systemd service that polls IMDSv2 `spot/instance-action` and writes `/run/codespace/interruption` when a notice arrives.
+
+## Ownership (agents work in parallel in this worktree; touch only your files)
+
+| Agent | Owns |
+|---|---|
+| infra | `infra/**` (standalone CDK app with its own package.json and lockfile; install with `pnpm install --ignore-workspace` inside `infra/`) |
+| ec2 | `src/server/aws/ec2.ts`, `src/server/workspaces.ts`, `src/server/db.ts`, `src/app/api/workspaces/**`, `scripts/smoke.ts` |
+| ssh | `src/server/remote.ts` (implement), `src/server/transport.ts`, `src/server/catalog.ts`, `src/server/threads.ts`, `next.config.ts` |
+| ui | `src/components/**`, `src/lib/api.ts`, `src/app/api/settings/route.ts`, `src/app/api/machines/route.ts`, `src/app/desktop/**`, `README.md`, `GLOSSARY.md` |
+
+Nobody commits. The integrator deletes `src/server/modal.ts`, removes the `modal` dependency, and runs typecheck, lint and build across the whole tree. Until then, errors in files you don't own are expected. Make your own files correct against the contract.
+
+## Multi-region (added after the first cut)
+
+Region is a price decision. Workspaces may run in any region in `awsRegions()` (`src/server/aws/config.ts`): the Keychain `aws-regions` comma list, else `CODESPACE_AWS_REGIONS`, else `DEFAULT_REGIONS` = us-east-1, us-east-2, us-west-2. These are AWS's base-price US regions; all three offer every type in `machines.ts` at the same on-demand price, so `onDemandHr` holds in each of them. The first region is the **home region** (`awsRegion()`).
+
+### Infra
+- `CodespaceStack` is deployed once per region: VPC, security group, instance profile, launch templates, SSM params and the AMI-param seeding.
+- **Image Builder pipelines run only in the home region** (context `images=true`). Each pipeline's distribution covers every region in context `regions` (comma list) and writes `PARAMS.amiId(variant)` in each one.
+- **IAM is global,** so the `CodespaceApp` policy (and the optional user) is created only by the home-region stack (`iam=true`). The other regions deploy with `iam=false`.
+
+### App
+- **`createWorkspace({ ..., region })`:** `region` is `"auto"` or one of `awsRegions()`.
+  - **Resolving `"auto"`:** consider regions whose infra is ready, whose AMI for the machine's variant is built, and which offer the type in at least one AZ.
+    - **Spot:** pick the lowest current spot price, breaking ties with the spot placement score.
+    - **On-demand:** prices are equal, so pick the best placement score for the type, falling back to the first region in `awsRegions()` order.
+  - The chosen region is stored in `workspaces.region`. Everything after creation already uses the row's region.
+- **`ec2.ts`:**
+  - `infraStatus(region)` checks one region; add `regionsStatus(): Promise<Array<{ region, ok, missing }>>` for all of them.
+  - `spotPrices(types, region)` already takes a region.
+  - Add `offeredRegions(types): Promise<Record<type, string[]>>`: regions where the type is offered, from DescribeInstanceTypeOfferings by region, cached 1 hour.
+- **`GET /api/machines`** returns `{ machines, defaultType, diskSteps, defaultDiskGb, regions: Array<{ region, ok, missing }>, offered: Record<type, string[]>, spot: Record<region, Record<type, number>> }`. Spot and offered are best-effort, each under a short timeout.
+- **`POST /api/workspaces`** body adds `region: "auto" | <region>` (default `"auto"`).
+- **`GET /api/settings`** returns `aws: AwsStatus & { regions: Array<{ region, ok, missing }> }` instead of a single `infra`. `POST` takes `awsRegions?: string` (comma list, each validated, first is home) instead of `awsRegion`, stores the `aws-regions` secret and calls `resetAws()`.
+- **Picker UI:** a Region control.
+  - **"Cheapest" (default):** shows which region it would pick and the price there.
+  - **Named regions:** one entry per region, with that region's spot price for the selected type. Regions that aren't ready or don't offer the type are disabled, with the reason.
+  - The workspace card shows its region (already does).
+
+## Cold storage and AMI retention (added before first deploy)
+
+### Cold tier: snapshot and delete after N days stopped
+- **Why:** a stopped workspace still pays for its whole provisioned gp3 volume ($0.08/GB-month). A snapshot is billed only for data actually written ($0.05/GB-month). A 50 GB volume with 12 GB used drops from ~$4.00 to ~$0.60 a month.
+- **Setting:** `coldAfterDays()` in `config.ts` reads the Keychain `cold-after-days`, else `CODESPACE_COLD_AFTER_DAYS`, else `DEFAULT_COLD_AFTER_DAYS = 3`. `0` means never.
+- **New DB columns on `workspaces`:**
+  - `stopped_at` (ms; set whenever the row becomes `stopped`, cleared on start)
+  - `archive_snapshot_id`
+  - `archived_at`
+- **Archiving** (the reaper, once per hour is enough). For each row that is `stopped`, has an `instance_id`, and has `stopped_at` older than N days:
+  1. **Clean shutdown first if hibernated.** If the row has `hibernate=1` and the instance was hibernated rather than stopped (StateReason or a remembered flag), start it, wait for running, then stop it with no hibernate. A hibernation image left on the root volume must not reach a new instance, which would try to resume from it.
+  2. **Snapshot.** Call `CreateSnapshot` on the root volume with tags `app=codespace`, `workspace=<id>`, `Name=codespace-<id>`, and description `codespace <id> cold storage`. Wait for `completed`, which can take minutes, and poll without blocking the reaper loop.
+  3. **Terminate and record.** Terminate the instance (the root volume has DeleteOnTermination; for spot, cancel the request as today). Set `instance_id = NULL`, `archive_snapshot_id`, `archived_at`. The state stays `stopped`.
+  - If any step fails, leave the instance as it is and record the error. The workspace must never be left with neither instance nor snapshot.
+  - Add a new action `archive` that does this now, from the UI.
+- **Restoring:** `start` on a row with `archive_snapshot_id` and no instance:
+  1. Launch exactly as `launchInstance` does (same type, market and region; any AZ, since snapshots aren't tied to one).
+  2. Set the root mapping to `{ DeviceName: <AMI root device>, Ebs: { SnapshotId, VolumeSize: max(disk_gb, snapshot size), VolumeType: gp3, Encrypted: true, DeleteOnTermination: true } }`.
+  3. Wait for SSH, re-run `bootstrap` (idempotent), then delete the snapshot and clear `archive_snapshot_id`/`archived_at`.
+  - Cloud-init sees a new instance ID, so it re-runs per-instance modules: new host keys, and the user-data key appended again. Both are harmless.
+- **Delete** of an archived workspace deletes the snapshot. The unsaved-work check can't run, so the API returns 409 "The workspace is in cold storage. Force delete to remove it and its snapshot."
+- **Workspace JSON** adds `archived: boolean`, `archived_at`.
+- **UI:**
+  - A "Cold" badge on the card and header.
+  - Start on a cold workspace says it restores from a snapshot and takes a few extra minutes; running processes are lost but files are kept.
+  - The workspace menu gets an "Archive now" action for stopped workspaces.
+  - Settings gets "Move stopped workspaces to cold storage after N days (0 = never)".
+  - `GET /api/settings` returns `coldAfterDays`; `POST` accepts `coldAfterDays` (an integer from 0 to 365) and stores the `cold-after-days` secret.
+- **IAM** (CodespaceApp):
+  - `ec2:CreateSnapshot` on volumes with resource tag `app=codespace`, and on snapshots with request tag `app=codespace`.
+  - `ec2:CreateTags` with `ec2:CreateAction=CreateSnapshot`.
+  - `ec2:DeleteSnapshot` on snapshots with resource tag `app=codespace`.
+  - `RunInstances` must allow a snapshot as a block-device source; the snapshot statement is already unconditioned.
+  - DescribeSnapshots is covered by `Describe*`.
+
+### AMI retention
+- An Image Builder lifecycle policy, in the home stack, keeps the **latest 2** images per pipeline. Older ones are deregistered, with their snapshots deleted, in **every distribution region**.
+- If Image Builder lifecycle policies can't clean up distributed copies, add a scheduled Lambda that does it, matching AMIs by the Image Builder tags.
+- The policy needs its own execution role (`EC2ImageBuilderLifecycleExecutionPolicy`).
