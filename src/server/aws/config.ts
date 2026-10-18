@@ -25,8 +25,9 @@ export function awsRegion(): string {
 export const DEFAULT_COLD_AFTER_DAYS = 3;
 
 export function coldAfterDays(): number {
-  const n = Number(getSecret("cold-after-days") ?? "");
-  return Number.isFinite(n) && n >= 0 && (getSecret("cold-after-days") ?? "") !== "" ? n : DEFAULT_COLD_AFTER_DAYS;
+  const raw = getSecret("cold-after-days");
+  const n = raw ? Number(raw) : NaN;
+  return Number.isInteger(n) && n >= 0 ? n : DEFAULT_COLD_AFTER_DAYS;
 }
 
 export function awsProfile(): string | undefined {
