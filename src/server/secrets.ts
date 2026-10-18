@@ -3,11 +3,12 @@ import { execFileSync } from "node:child_process";
 // Credentials live in the macOS Keychain (service "codespace"); env vars override.
 const SERVICE = "codespace";
 
-export type SecretName = "modal-token-id" | "modal-token-secret" | "claude-oauth-token";
+/** AWS profile and region aren't secret, but live here so Settings has one store. */
+export type SecretName = "aws-profile" | "aws-region" | "claude-oauth-token";
 
 const ENV: Record<SecretName, string> = {
-  "modal-token-id": "MODAL_TOKEN_ID",
-  "modal-token-secret": "MODAL_TOKEN_SECRET",
+  "aws-profile": "CODESPACE_AWS_PROFILE",
+  "aws-region": "CODESPACE_AWS_REGION",
   "claude-oauth-token": "CLAUDE_CODE_OAUTH_TOKEN",
 };
 
