@@ -163,6 +163,11 @@ What the policy allows, all region-agnostic:
 - **Lifecycle** (start, stop, terminate, modify, cancel spot) only on resources tagged `app=codespace`.
 - **`iam:PassRole`** only on roles under `/codespace/`, and only to EC2.
 - **`iam:CreateServiceLinkedRole`** only for `AWSServiceRoleForEC2Spot` (`spot.amazonaws.com`). The first spot launch in an account that has never used spot creates that role, and fails with `AuthFailure.ServiceLinkedRoleCreationNotPermitted` without this permission.
+- **Cold storage snapshots:**
+  - `CreateSnapshot` only from volumes tagged `app=codespace`, and only when the new snapshot is tagged `app=codespace`
+  - `CreateTags` on snapshots only as part of `CreateSnapshot`
+  - `DeleteSnapshot` only on snapshots tagged `app=codespace`
+  - launching from a snapshot root falls under `RunInstances` on `snapshot/*`
 - **SSM parameters:** read `/codespace/*` and `/aws/service/*`.
 - **Sessions:**
   - `ssm:StartSession` on instances tagged `app=codespace` and the `AWS-StartSSHSession` document
@@ -172,10 +177,22 @@ What the policy allows, all region-agnostic:
 
 - **No NAT gateway:** instances use public IPv4 addresses directly. AWS charges about $0.005/hour, roughly **$3.60/month**, for each public IPv4 while an instance is running. A stopped or hibernated instance has no public IP and pays nothing for it.
 - **EBS** is billed while instances are stopped or hibernated. That's the price of keeping the disk: gp3 is about $0.08/GB-month in us-east-1, so a 50 GB workspace costs about $4/month at rest. Hibernated instances also keep their RAM image on that volume, which is why the app sizes the root volume as disk + RAM.
-- **AMIs:**
+- **Cold storage:** after a workspace has been stopped for `cold-after-days` (default 3; set in the app's Settings, 0 = never), the app snapshots its root volume, terminates the instance, and keeps only the snapshot.
+  - **Cost:** snapshots are billed for the data actually written, about $0.05/GB-month, instead of the whole provisioned volume. A 50 GB volume with 12 GB used drops from about $4.00 to about $0.60 a month.
+  - **Restore:** starting a cold workspace launches a new instance from the snapshot. That takes a few extra minutes. Files are kept, but running processes and RAM are not. The snapshot is deleted once the workspace is back.
+  - **Delete:** deleting a cold workspace also deletes its snapshot.
+  - **What it needs here:** nothing beyond the `CodespaceApp` snapshot permissions above.
+- **AMIs and retention:**
   - Each build keeps an AMI and its snapshot in **every** region it's copied to, about $0.05/GB-month per copy.
-  - The CPU images are 16 GB; the DLAMI-based images are larger.
-  - Deregister old `codespace-*` AMIs, and delete their snapshots, now and then, especially with weekly builds.
+  - The CPU images are 16 GB; the DLAMI-based images are 65 GB (arm64) and 75 GB (x86_64).
+  - The home stack's lifecycle policy `codespace-ami-retention` (Image Builder runs it daily) keeps the **2 newest images per recipe version** and deletes older ones: the Image Builder image, its AMIs in every distribution region, and their snapshots. It runs with its own role (`EC2ImageBuilderLifecycleExecutionPolicy`).
+  - The newest image is always the one `/codespace/ami/<variant>` points to, because each successful build rewrites the parameter. Deregistering an AMI doesn't affect instances already launched from it.
+  - **Limitation:** Image Builder counts per recipe **version**. Changing `setup.sh`, the parent image or the root size creates a new version (`codespace-<variant>/1.0.<hash>`), and the previous version keeps its last 2 images. Deregister those by hand when convenient:
+    ```sh
+    aws imagebuilder list-image-build-versions --image-version-arn arn:aws:imagebuilder:us-east-1:<account>:image/codespace-cpu-arm64/<old-version>
+    aws imagebuilder start-resource-state-update --resource-arn <image build version arn> \
+      --state status=DELETED --include-resources amis=true,snapshots=true --execution-role <ImageLifecycleRole arn>
+    ```
 - **Image builds:** each runs one xlarge build instance for its duration, cents per build.
 - **Always free here:** the VPC, subnets, security group, S3 gateway endpoint, SSM parameters (standard tier), launch templates, and Image Builder itself.
 - **Custom resources:** the two Lambda-backed ones run only during deploys.

@@ -2,8 +2,8 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { api, ApiError, machineLabel, type RepoRisk, type Thread, type Workspace } from "@/lib/api";
-import { Button, Icon, Input, Logo, MarketTag, Spinner, StateDot } from "./ui";
+import { api, ApiError, machineLabel, RESTORE_HINT, type RepoRisk, type Thread, type Workspace } from "@/lib/api";
+import { Button, ColdTag, Icon, Input, Logo, MarketTag, Spinner, StateDot } from "./ui";
 import { Composer } from "./composer/Composer";
 import { LoadoutPicker } from "./LoadoutPicker";
 import { DeleteWorkspace } from "./DeleteFlow";
@@ -72,7 +72,7 @@ export function WorkspaceView({ id }: { id: string }) {
     load();
   };
 
-  const act = async (action: "start" | "pause" | "stop" | "setup") => {
+  const act = async (action: "start" | "pause" | "stop" | "setup" | "archive") => {
     // A 409 means another action is already running; other failures land on the row's error.
     await api(`/api/workspaces/${id}/action`, { method: "POST", json: { action } }).catch(() => {});
     load();
@@ -104,6 +104,7 @@ export function WorkspaceView({ id }: { id: string }) {
             <StateDot state={ws.state} />
             <span className="font-semibold capitalize">{ws.state}</span>
             <span className={`font-mono ${ws.machine?.gpu ? "text-gpu" : "text-muted"}`}>{machineLabel(ws)}</span>
+            {ws.archived && <ColdTag archivedAt={ws.archived_at} />}
             {ws.market && <MarketTag market={ws.market} />}
             {ws.region && (
               <span className="font-mono text-faint" title={ws.az ? `Availability zone ${ws.az}` : undefined}>
@@ -137,10 +138,21 @@ export function WorkspaceView({ id }: { id: string }) {
               Retry setup
             </Button>
           ) : startable ? (
-            <Button variant="primary" onClick={() => act("start")}>
-              <Icon name="play" size={12} />
-              Start
-            </Button>
+            <>
+              {ws.state === "stopped" && !ws.archived && ws.instance_id && (
+                <Button
+                  variant="ghost"
+                  onClick={() => act("archive")}
+                  title="Snapshot the disk and remove the instance now. A stopped disk costs about $0.08/GB-month; a snapshot about $0.05/GB-month of data actually written. The next start takes a few extra minutes."
+                >
+                  Archive now
+                </Button>
+              )}
+              <Button variant="primary" onClick={() => act("start")} title={ws.archived ? RESTORE_HINT : undefined}>
+                <Icon name="play" size={12} />
+                Start
+              </Button>
+            </>
           ) : null}
           <Button variant="ghost" onClick={() => setDeleting(true)}>
             Delete
@@ -229,7 +241,7 @@ export function WorkspaceView({ id }: { id: string }) {
         )}
       </div>
 
-      {deleting && <DeleteWorkspace id={id} name={ws.name} onClose={() => setDeleting(false)} onDone={() => router.push("/")} />}
+      {deleting && <DeleteWorkspace id={id} name={ws.name} archived={ws.archived} onClose={() => setDeleting(false)} onDone={() => router.push("/")} />}
     </div>
   );
 }
@@ -426,13 +438,14 @@ function IdleSetting({ ws, reload }: { ws: Full; reload: () => void }) {
 function NeedsRunning({ ws, onStart }: { ws: Full; onStart: () => void }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
-      <div className="text-[15px] font-semibold">Workspace is {ws.state}</div>
+      <div className="text-[15px] font-semibold">Workspace is {ws.archived ? "in cold storage" : ws.state}</div>
       {ws.instance_type && ["stopped", "error"].includes(ws.state) && (
         <Button variant="primary" onClick={onStart}>
           <Icon name="play" size={12} />
           Start
         </Button>
       )}
+      {ws.archived && <p className="max-w-xs text-xs text-muted">{RESTORE_HINT}</p>}
     </div>
   );
 }

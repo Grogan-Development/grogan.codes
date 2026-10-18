@@ -1,7 +1,7 @@
 import { nanoid } from "nanoid";
 import { db, now } from "./db";
 import { remote, waitForRemote, forgetRemote, forwardPort, setInstanceRegion, run, mustRun, q, WORKSPACE_ROOT, HOME, TERMINAL_PORT, VNC_PORT, type Remote } from "./remote";
-import { awsRegion, awsRegions } from "./aws/config";
+import { awsRegion, awsRegions, coldAfterDays } from "./aws/config";
 import { machine, MARKETS, DISK_GB_STEPS, type Machine, type Market } from "./aws/machines";
 import {
   launchInstance,
@@ -15,6 +15,10 @@ import {
   spotInterrupted,
   rootVolumeGb,
   resolveRegion,
+  maybeHibernated,
+  createRootSnapshot,
+  snapshotState,
+  deleteSnapshot,
   type InstanceInfo,
 } from "./aws/ec2";
 import { githubToken, gitIdentity } from "./secrets";
@@ -32,6 +36,12 @@ export type Workspace = {
   /** 1 when the instance was launched with hibernation, so pause keeps RAM. */
   hibernate: number;
   instance_started_at: number | null;
+  /** When the row last became stopped; cleared once it runs again. Drives cold storage. */
+  stopped_at: number | null;
+  /** Cold storage: the root-volume snapshot. Set without archived_at while an archive is still running. */
+  archive_snapshot_id: string | null;
+  /** Set once the instance is gone and the snapshot is the only copy. */
+  archived_at: number | null;
   /** The root volume's real size in GiB, including room for RAM when hibernating. */
   disk_gb: number | null;
   disk_used_mb: number | null;
@@ -85,7 +95,7 @@ export function listRepos(workspaceId: string): Repo[] {
 export function workspaceJson(w: Workspace) {
   const { sandbox_id, image_id, sandbox_started_at, cpu, memory_mib, gpu, ...rest } = w;
   void [sandbox_id, image_id, sandbox_started_at, cpu, memory_mib, gpu];
-  return { ...rest, machine: machineOf(w) };
+  return { ...rest, archived: !!w.archived_at, machine: machineOf(w) };
 }
 
 function machineOf(w: Workspace): Machine | null {
@@ -96,8 +106,13 @@ function machineOf(w: Workspace): Machine | null {
   }
 }
 
+const ARCHIVING = "archiving";
+
+/** Also keeps stopped_at: set when the row becomes stopped (archiving still counts), cleared otherwise. */
 function setState(id: string, state: string, error: string | null = null) {
-  db().prepare("UPDATE workspaces SET state = ?, error = ? WHERE id = ?").run(state, error, id);
+  db()
+    .prepare("UPDATE workspaces SET state = ?, error = ?, stopped_at = CASE WHEN ? IN ('stopped', ?) THEN COALESCE(stopped_at, ?) ELSE NULL END WHERE id = ?")
+    .run(state, error, state, ARCHIVING, now(), id);
 }
 
 const regionOf = (w: Workspace) => w.region ?? awsRegion();
@@ -182,10 +197,10 @@ function guarded<T>(id: string, fn: () => Promise<T>): Promise<T> {
   return p;
 }
 
-/** The disk size the user picked: a launched row's disk_gb also holds the hibernation room. */
+/** The disk size the user picked: once launched with hibernation, disk_gb also holds room for RAM. */
 function requestedDiskGb(w: Workspace, m: Machine): number {
   const size = w.disk_gb ?? 50;
-  return w.instance_id && w.hibernate ? size - rootVolumeGb(m, 0) : size;
+  return w.hibernate ? size - rootVolumeGb(m, 0) : size;
 }
 
 /** Launch a new instance, or reuse the one a failed setup left behind. */
@@ -336,25 +351,61 @@ async function start(id: string): Promise<Remote> {
   return guarded(id, async () => {
     const w = getWorkspace(id);
     if (!w.instance_type) throw new Error(MODAL_ERA);
-    if (!w.instance_id) throw new Error("Workspace has no instance. Retry setup.");
+    if (!w.instance_id && !w.archived_at) throw new Error("Workspace has no instance. Retry setup.");
     const region = regionOf(w);
     setState(id, "starting");
     try {
-      let info = await describeInstance(w.instance_id, region);
-      if (!info || info.state === "terminated" || info.state === "shutting-down") throw new Error(TERMINATED);
-      if (info.state === "stopping") info = await waitForState(w.instance_id, "stopped", { region });
-      if (info.state === "stopped") await startInstance(w.instance_id, region);
-      await waitForState(w.instance_id, "running", { region });
-      const r = await waitForRemote(w.instance_id);
+      const instanceId = w.instance_id ?? (await restoreInstance(w));
+      if (w.instance_id) {
+        let info = await describeInstance(instanceId, region);
+        if (!info || info.state === "terminated" || info.state === "shutting-down") throw new Error(TERMINATED);
+        if (info.state === "stopping") info = await waitForState(instanceId, "stopped", { region });
+        if (info.state === "stopped") await startInstance(instanceId, region);
+      }
+      await waitForState(instanceId, "running", { region });
+      const r = await waitForRemote(instanceId);
+      // Restored from cold storage, or an archive cut short by this start: the instance is the
+      // copy now, so the snapshot can go once the machine checks out.
+      if (w.archive_snapshot_id) {
+        await bootstrap(r);
+        await deleteSnapshot(w.archive_snapshot_id, region);
+        db().prepare("UPDATE workspaces SET archive_snapshot_id = NULL, archived_at = NULL WHERE id = ?").run(id);
+      }
       db().prepare("UPDATE workspaces SET instance_started_at = ? WHERE id = ?").run(now(), id);
       setState(id, "started");
       touch(id); // or the reaper would pause it again on its next pass
       return r;
     } catch (err) {
-      await reconcile(getWorkspace(id), err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      const cur = getWorkspace(id);
+      if (cur.instance_id) await reconcile(cur, msg);
+      else setState(id, "stopped", msg); // restore never launched: still safely in cold storage
       throw err;
     }
   });
+}
+
+/** Launches a new instance whose root volume comes from the cold-storage snapshot (any AZ). */
+async function restoreInstance(w: Workspace): Promise<string> {
+  const region = regionOf(w);
+  const m = machine(w.instance_type!);
+  const l = await launchInstance({
+    workspaceId: w.id,
+    machine: m,
+    market: (w.market ?? "on-demand") as Market,
+    diskGb: requestedDiskGb(w, m),
+    region,
+    snapshotId: w.archive_snapshot_id!,
+  });
+  db()
+    .prepare("UPDATE workspaces SET instance_id = ?, az = ?, hibernate = ?, disk_gb = ?, instance_started_at = ? WHERE id = ?")
+    .run(l.instanceId, l.az, l.hibernate ? 1 : 0, l.volumeGb, now(), w.id);
+  if (!db().prepare("SELECT 1 FROM workspaces WHERE id = ?").get(w.id)) {
+    await terminateInstance(l.instanceId, region);
+    throw new Error("Workspace was deleted during restore");
+  }
+  setInstanceRegion(l.instanceId, region);
+  return l.instanceId;
 }
 
 /** Pause hibernates when the instance was launched for it (RAM survives); otherwise both are a plain stop. */
@@ -398,6 +449,7 @@ export async function deleteWorkspace(id: string) {
     forgetRemote(w.instance_id);
     await terminateInstance(w.instance_id, regionOf(w));
   }
+  if (w.archive_snapshot_id) await deleteSnapshot(w.archive_snapshot_id, regionOf(w));
   db().prepare("DELETE FROM workspaces WHERE id = ?").run(id);
 }
 
@@ -405,8 +457,8 @@ export async function setIdleMinutes(id: string, minutes: number) {
   db().prepare("UPDATE workspaces SET idle_minutes = ? WHERE id = ?").run(minutes, id);
 }
 
-/** Provisioning owns these states; a failed setup stays put until retried. */
-const SETUP_STATES = ["creating", "setting up", SETUP_FAILED];
+/** Provisioning owns these states (a failed setup stays put until retried), and the archiver owns its own. */
+const SETUP_STATES = ["creating", "setting up", SETUP_FAILED, ARCHIVING];
 
 /** Write EC2's view of the instance into the row. `error` overrides the message for a failed action. */
 async function reconcile(w: Workspace, error: string | null = null, info?: InstanceInfo | null): Promise<Workspace> {
@@ -452,6 +504,7 @@ export async function ensureStarted(id: string): Promise<Remote> {
   if (w.state === SETUP_FAILED) throw new Error(`Workspace setup failed: ${w.error ?? "unknown error"}. Retry setup first.`);
   if ((w.state === "started" || w.state === "setting up") && w.instance_id) return remote(w.instance_id);
   if (w.state === "error" && w.error === TERMINATED) throw new Error(TERMINATED);
+  if (w.state === ARCHIVING) throw new Error("Workspace is moving to cold storage. Start it again in a few minutes.");
   // A provision or start already under way: wait for it, then look again.
   const pending = inflight.get(id);
   if (pending) {
@@ -494,7 +547,7 @@ const isIdle = (w: Workspace) => now() - w.last_activity_at > w.idle_minutes * 6
  */
 async function reap() {
   const rows = (db().prepare("SELECT * FROM workspaces WHERE instance_id IS NOT NULL AND instance_type IS NOT NULL").all() as Workspace[]).filter(
-    (w) => !inflight.has(w.id) && w.state !== "creating" && w.state !== "setting up",
+    (w) => !inflight.has(w.id) && w.state !== "creating" && w.state !== "setting up" && w.state !== ARCHIVING,
   );
   const byRegion = new Map<string, Workspace[]>();
   for (const w of rows) byRegion.set(regionOf(w), [...(byRegion.get(regionOf(w)) ?? []), w]);
@@ -527,6 +580,113 @@ async function reap() {
     const busy = db().prepare("SELECT 1 FROM threads WHERE workspace_id = ? AND status IN ('starting', 'running', 'waiting')").get(w.id);
     if (isIdle(w) && !busy) await lifecycle(w.id, "pause").catch(() => {});
   }
+  coldStorage();
+}
+
+// ---- Cold storage -----------------------------------------------------------
+
+const ARCHIVE_POLL_MS = 15_000;
+const COLD_CHECK_MS = 60 * 60_000;
+let lastColdCheck = 0;
+
+/** Starts archives that are due and resumes any a restart interrupted. Never waits on them. */
+function coldStorage() {
+  const resume = db().prepare("SELECT id FROM workspaces WHERE state = ?").all(ARCHIVING) as { id: string }[];
+  for (const { id } of resume) if (!inflight.has(id)) void runArchive(id);
+  const days = coldAfterDays();
+  if (!days || now() - lastColdCheck < COLD_CHECK_MS) return;
+  lastColdCheck = now();
+  const due = db()
+    .prepare("SELECT id FROM workspaces WHERE state = 'stopped' AND instance_id IS NOT NULL AND archived_at IS NULL AND stopped_at < ?")
+    .all(now() - days * 86_400_000) as { id: string }[];
+  for (const { id } of due) if (!inflight.has(id)) archiveWorkspace(id);
+}
+
+/**
+ * Cold storage: snapshot the root volume, then terminate the instance, so a long-stopped workspace
+ * pays only for data written. Runs in the background; the route returns at once.
+ */
+export function archiveWorkspace(id: string) {
+  const w = getWorkspace(id);
+  if (w.archived_at) throw new Error("Workspace is already in cold storage");
+  if (w.state !== "stopped" || !w.instance_id) throw new Error("Only a stopped workspace can move to cold storage. Stop it first.");
+  if (inflight.has(id)) throw new BusyError();
+  setState(id, ARCHIVING);
+  void runArchive(id);
+}
+
+/** Drives an archive to the end one step at a time, reading progress from the row so a restart resumes it. */
+function runArchive(id: string): Promise<void> {
+  return guarded(id, async () => {
+    for (;;) {
+      const w = db().prepare("SELECT * FROM workspaces WHERE id = ?").get(id) as Workspace | undefined;
+      if (!w || w.state !== ARCHIVING) return; // deleted, or a start took over
+      try {
+        if (await archiveStep(w)) return;
+      } catch (err) {
+        // The instance (and any finished snapshot) is left as it is; the next hourly check retries.
+        const msg = `Moving to cold storage failed: ${err instanceof Error ? err.message : err}. Nothing was lost; it will be retried.`;
+        const cur = getWorkspace(id);
+        await reconcile(cur, msg).catch(() => setState(id, "stopped", msg));
+        if (getWorkspace(id).state === ARCHIVING) setState(id, "stopped", msg); // reconcile couldn't tell
+        return;
+      }
+      await new Promise((r) => setTimeout(r, ARCHIVE_POLL_MS));
+    }
+  }).catch((err) => {
+    if (!(err instanceof BusyError)) console.error(`[archive ${id}]`, err);
+  });
+}
+
+/** One step of the archive; true when it is finished. The instance is only dropped once its snapshot is complete. */
+async function archiveStep(w: Workspace): Promise<boolean> {
+  const region = regionOf(w);
+  const iid = w.instance_id;
+  if (!iid) {
+    if (w.archive_snapshot_id) db().prepare("UPDATE workspaces SET archived_at = COALESCE(archived_at, ?) WHERE id = ?").run(now(), w.id);
+    setState(w.id, "stopped");
+    return true;
+  }
+  if (w.archive_snapshot_id) {
+    const snap = await snapshotState(w.archive_snapshot_id, region);
+    if (!snap || snap.state === "error") {
+      if (snap) await deleteSnapshot(w.archive_snapshot_id, region);
+      db().prepare("UPDATE workspaces SET archive_snapshot_id = NULL WHERE id = ?").run(w.id);
+      if (snap) throw new Error(`the snapshot failed${snap.message ? `: ${snap.message}` : ""}`);
+      return false; // vanished: take a new one
+    }
+    if (snap.state !== "completed") return false;
+    forgetRemote(iid);
+    await terminateInstance(iid, region); // also cancels a persistent spot request
+    db().prepare("UPDATE workspaces SET instance_id = NULL, instance_started_at = NULL, archived_at = ? WHERE id = ?").run(now(), w.id);
+    setState(w.id, "stopped");
+    return true;
+  }
+  const info = await describeInstance(iid, region);
+  if (!info || info.state === "terminated" || info.state === "shutting-down") throw new Error(TERMINATED);
+  if (info.state === "pending" || info.state === "stopping") return false;
+  if (info.state === "running") {
+    // The clean-shutdown boot below: let the OS finish resuming, then stop without hibernating.
+    await waitForRemote(iid, 180_000).then(
+      () => forgetRemote(iid),
+      () => {},
+    );
+    await stopInstance(iid, {}, region);
+    return false;
+  }
+  // A hibernation image on the root volume must not reach a new instance, which would try to
+  // resume from it: boot once and shut down cleanly before snapshotting.
+  if (maybeHibernated(info)) {
+    await startInstance(iid, region);
+    return false;
+  }
+  const snapId = await createRootSnapshot(iid, w.id, region);
+  db().prepare("UPDATE workspaces SET archive_snapshot_id = ? WHERE id = ?").run(snapId, w.id);
+  if (!db().prepare("SELECT 1 FROM workspaces WHERE id = ?").get(w.id)) {
+    await deleteSnapshot(snapId, region); // deleted mid-archive
+    return true;
+  }
+  return false;
 }
 
 const g = globalThis as unknown as { __csReaper?: NodeJS.Timeout };

@@ -45,7 +45,8 @@ Settings are stored in the macOS Keychain under the service `codespace` (the app
 - **Market** is chosen per workspace:
   - **On-demand** costs full price, and the instance runs until you stop it.
   - **Spot** is usually much cheaper, but AWS can reclaim the instance with 2 minutes' notice. The disk is kept either way: CPU types hibernate and GPU types stop. The workspace shows as stopped with a note, and you start it again when capacity returns.
-- Deleting a workspace terminates the instance and deletes its disk (and cancels the spot request). Before that, and before removing a repo, the app checks for uncommitted, unpushed or stashed work.
+- **Cold storage**: a stopped instance still pays for its whole volume (about $0.08 per GB-month). After a workspace has been stopped for N days (Settings, default 3, 0 = never), or when you click **Archive now**, the app snapshots the disk and terminates the instance. A snapshot is billed only for data written (about $0.05 per GB-month), so a 50 GB disk with 12 GB used drops from about $4.00 to $0.60 a month. The workspace shows a **Cold** badge. Starting it restores: a new instance is built from the snapshot, which takes a few extra minutes. Files are kept; running processes and hibernated memory are not.
+- Deleting a workspace terminates the instance and deletes its disk (and cancels the spot request), or deletes the snapshot of a cold one. Before that, and before removing a repo, the app checks for uncommitted, unpushed or stashed work.
 
 ## What's in it
 

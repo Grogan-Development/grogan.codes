@@ -2,11 +2,22 @@
 // launch template, sets it up like a workspace, runs one Claude turn over SSH-over-SSM, checks
 // the terminal and desktop through local port forwards, then hibernates, starts and checks a
 // file survived. The instance is terminated (and its spot request cancelled) in `finally`.
-// Costs money. Usage: pnpm smoke   (SMOKE_SPOT=1 for spot, SMOKE_TYPE=m8g.large, SMOKE_REGION=us-west-2)
+// Costs money. Usage: pnpm smoke   (SMOKE_SPOT=1 for spot, SMOKE_TYPE=m8g.large, SMOKE_REGION=us-west-2,
+// SMOKE_COLD=1 to also archive to a snapshot and restore from it)
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { awsRegion } from "../src/server/aws/config";
 import { machine, machineLabel } from "../src/server/aws/machines";
-import { launchInstance, startInstance, stopInstance, terminateInstance, waitForState, describeInstance } from "../src/server/aws/ec2";
+import {
+  launchInstance,
+  startInstance,
+  stopInstance,
+  terminateInstance,
+  waitForState,
+  describeInstance,
+  createRootSnapshot,
+  snapshotState,
+  deleteSnapshot,
+} from "../src/server/aws/ec2";
 import { waitForRemote, forgetRemote, setInstanceRegion, forwardPort, run, WORKSPACE_ROOT, VNC_PORT, TERMINAL_PORT } from "../src/server/remote";
 import { bootstrap } from "../src/server/workspaces";
 import { spawnRemote } from "../src/server/transport";
@@ -14,7 +25,8 @@ import { getSecret } from "../src/server/secrets";
 
 const step = (s: string) => console.log(`\n▶ ${s}`);
 const secs = (t0: number) => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
-let instanceId: string | null = null;
+const instances: string[] = []; // terminated in finally
+let snapshotId: string | null = null; // deleted in finally
 const region = process.env.SMOKE_REGION || awsRegion();
 
 /** Opens a websocket and reports whether the handshake succeeded. */
@@ -36,7 +48,7 @@ async function main() {
   step(`launch ${machineLabel(m)} (${market}) in ${region}`);
   let t0 = Date.now();
   const l = await launchInstance({ workspaceId: `smoke-${Date.now().toString(36)}`, machine: m, market, diskGb: 30, region });
-  instanceId = l.instanceId;
+  instances.push(l.instanceId);
   setInstanceRegion(l.instanceId, region);
   console.log(`  ${l.instanceId} in ${l.az}, ${l.volumeGb} GiB root, hibernate=${l.hibernate}`);
   await waitForState(l.instanceId, "running", { region });
@@ -98,6 +110,33 @@ async function main() {
   console.log(`  file: ${(await run(r, `cat ${WORKSPACE_ROOT}/smoke.txt`)).output.trim()}`);
   console.log(`  sleep process survived: ${(await run(r, `pgrep -x sleep >/dev/null && echo yes || echo no`)).output.trim()}`);
   console.log(`  instance: ${JSON.stringify(await describeInstance(l.instanceId, region))}`);
+
+  if (process.env.SMOKE_COLD !== "1") return;
+  step("cold storage: clean stop, snapshot, terminate, restore");
+  await run(r, `echo smoke-cold > ${WORKSPACE_ROOT}/cold.txt; sync`);
+  forgetRemote(l.instanceId);
+  // A plain stop: a hibernation image must not reach the restored instance.
+  await stopInstance(l.instanceId, {}, region);
+  await waitForState(l.instanceId, "stopped", { region });
+  t0 = Date.now();
+  snapshotId = await createRootSnapshot(l.instanceId, "smoke", region);
+  for (let s = await snapshotState(snapshotId, region); s?.state !== "completed"; s = await snapshotState(snapshotId, region)) {
+    if (!s || s.state === "error") throw new Error(`snapshot ${snapshotId} is ${s?.state ?? "gone"}: ${s?.message ?? ""}`);
+    await new Promise((res) => setTimeout(res, 10_000));
+  }
+  console.log(`  ${snapshotId} completed in ${secs(t0)}`);
+  await terminateInstance(l.instanceId, region);
+  const gone = await waitForState(l.instanceId, "terminated", { region });
+  console.log(`  old instance ${gone.state}; snapshot ${(await snapshotState(snapshotId, region))?.state}`);
+  t0 = Date.now();
+  const back = await launchInstance({ workspaceId: "smoke", machine: m, market, diskGb: 30, region, snapshotId });
+  instances.push(back.instanceId);
+  setInstanceRegion(back.instanceId, region);
+  await waitForState(back.instanceId, "running", { region });
+  r = await waitForRemote(back.instanceId);
+  await bootstrap(r);
+  console.log(`  restored ${back.instanceId} in ${back.az} (${back.volumeGb} GiB) in ${secs(t0)}`);
+  console.log(`  files: ${(await run(r, `cat ${WORKSPACE_ROOT}/smoke.txt ${WORKSPACE_ROOT}/cold.txt`)).output.trim()}`);
 }
 
 main()
@@ -106,12 +145,19 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
-    if (instanceId) {
-      step(`terminate ${instanceId}`);
-      forgetRemote(instanceId);
-      await terminateInstance(instanceId, region).then(
+    for (const id of instances) {
+      step(`terminate ${id}`);
+      forgetRemote(id);
+      await terminateInstance(id, region).then(
         () => console.log("  terminated (spot request cancelled if any)"),
-        (err) => console.error(`  ✗ terminate failed, clean up ${instanceId} by hand:`, err),
+        (err) => console.error(`  ✗ terminate failed, clean up ${id} by hand:`, err),
+      );
+    }
+    if (snapshotId) {
+      step(`delete ${snapshotId}`);
+      await deleteSnapshot(snapshotId, region).then(
+        () => console.log("  deleted"),
+        (err) => console.error(`  ✗ delete failed, clean up ${snapshotId} by hand:`, err),
       );
     }
     process.exit();

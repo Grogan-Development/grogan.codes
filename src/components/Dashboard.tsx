@@ -3,11 +3,11 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { AwsStatus } from "@/server/aws/config";
-import { api, diskUse, dollars, gpuShare, machineLabel, timeAgo, type MachinesInfo, type Market, type RegionStatus, type Thread, type Workspace } from "@/lib/api";
+import { api, diskUse, RESTORE_HINT, dollars, gpuShare, machineLabel, timeAgo, type MachinesInfo, type Market, type RegionStatus, type Thread, type Workspace } from "@/lib/api";
 import { bestSpot, estimate, InstancePicker, RegionPicker, regionBlocker, resolveCheapest } from "./InstancePicker";
 import { ThreadSquares } from "./ThreadSquares";
 import type { PermissionEvent } from "./composer/model";
-import { Button, Icon, Input, Logo, MarketTag, Modal, Segmented, StateDot } from "./ui";
+import { Button, ColdTag, Icon, Input, Logo, MarketTag, Modal, Segmented, StateDot } from "./ui";
 import { LoadoutPicker } from "./LoadoutPicker";
 import { DeleteWorkspace } from "./DeleteFlow";
 
@@ -16,6 +16,8 @@ type Settings = {
   claude: boolean;
   github: boolean;
   ssmPlugin: boolean;
+  /** Stopped workspaces move to cold storage after this many days; 0 = never. */
+  coldAfterDays: number;
 };
 
 /** AWS is usable with working credentials, the SSM plugin, and the infra stack in at least one region. */
@@ -146,7 +148,7 @@ export function Dashboard() {
       {settingsOpen && settings && (
         <SettingsModal settings={settings} onClose={() => setSettingsOpen(false)} onSaved={() => api<Settings>("/api/settings").then(setSettings)} />
       )}
-      {deleting && <DeleteWorkspace id={deleting.id} name={deleting.name} onClose={() => setDeleting(null)} onDone={() => (setDeleting(null), load())} />}
+      {deleting && <DeleteWorkspace id={deleting.id} name={deleting.name} archived={deleting.archived} onClose={() => setDeleting(null)} onDone={() => (setDeleting(null), load())} />}
     </div>
   );
 }
@@ -191,6 +193,7 @@ function WorkspaceRow({ w, onAct, onDelete }: { w: Workspace; onAct: (id: string
               {gpuShare(w.machine.gpu)} {w.machine.gpu.vramGb} GB
             </span>
           )}
+          {w.archived && <ColdTag archivedAt={w.archived_at} />}
           {w.market && <MarketTag market={w.market} />}
           {w.region && <span className="font-mono text-[11px] text-faint">{w.region}</span>}
         </span>
@@ -201,7 +204,12 @@ function WorkspaceRow({ w, onAct, onDelete }: { w: Workspace; onAct: (id: string
           Open
         </Link>
       ) : (
-        <Button className="w-24 justify-center" onClick={() => onAct(w.id, "start")} disabled={/ing$/.test(w.state) || !w.instance_type}>
+        <Button
+          className="w-24 justify-center"
+          title={w.archived ? RESTORE_HINT : undefined}
+          onClick={() => onAct(w.id, "start")}
+          disabled={/ing$/.test(w.state) || !w.instance_type}
+        >
           <Icon name="play" size={12} />
           Start
         </Button>
@@ -521,6 +529,7 @@ function SettingsModal({ settings, onClose, onSaved }: { settings: Settings; onC
   const [profile, setProfile] = useState(settings.aws.profile ?? "");
   const [regions, setRegions] = useState(settings.aws.regions.map((r) => r.region).join(", "));
   const [claudeToken, setClaudeToken] = useState("");
+  const [coldDays, setColdDays] = useState(String(settings.coldAfterDays));
   const [error, setError] = useState("");
   const [phase, setPhase] = useState<"idle" | "saving" | "saved">("idle");
   const { aws, ssmPlugin } = settings;
@@ -583,6 +592,18 @@ function SettingsModal({ settings, onClose, onSaved }: { settings: Settings; onC
           </StatusRow>
         </div>
 
+        <div className="flex flex-col gap-1.5">
+          <label className="flex flex-wrap items-center gap-2 text-[13px]">
+            Move stopped workspaces to cold storage after
+            <Input type="number" min={0} max={365} step={1} value={coldDays} onChange={(e) => setColdDays(e.target.value)} className="w-20 py-1 font-mono" />
+            days
+          </label>
+          <span className="text-xs text-faint">
+            0 = never. Cold storage snapshots the disk and removes the instance, so you pay only for data written (about $0.05/GB-month instead of $0.08 for the whole
+            volume). Starting it again takes a few extra minutes.
+          </span>
+        </div>
+
         <label className="flex flex-col gap-2">
           <span className="flex items-center gap-2 text-[13px] font-semibold">
             <StateDot state={settings.claude ? "ready" : "error"} /> Claude subscription token
@@ -611,7 +632,7 @@ function SettingsModal({ settings, onClose, onSaved }: { settings: Settings; onC
               setError("");
               setPhase("saving");
               try {
-                await api("/api/settings", { method: "POST", json: { awsProfile: profile, awsRegions: regions, claudeToken } });
+                await api("/api/settings", { method: "POST", json: { awsProfile: profile, awsRegions: regions, claudeToken, coldAfterDays: coldDays.trim() } });
                 await onSaved();
               } catch (e) {
                 setError(String(e instanceof Error ? e.message : e));

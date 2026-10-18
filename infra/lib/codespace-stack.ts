@@ -241,6 +241,7 @@ export class CodespaceStack extends Stack {
       }
 
       const pipelines: Record<string, imagebuilder.CfnImagePipeline> = {};
+      const recipes: imagebuilder.CfnImageRecipe[] = [];
       for (const v of IMAGE_VARIANTS) {
         const spec = VARIANTS[v];
         const parentImage = `ssm:${spec.parentParam}`;
@@ -251,10 +252,12 @@ export class CodespaceStack extends Stack {
             ebs: { volumeType: "gp3", encrypted: true, deleteOnTermination: true, ...(spec.gpu ? {} : { volumeSize: CPU_IMAGE_ROOT_GB }) },
           },
         ];
-        const recipeName = `codespace-${v}-${short(JSON.stringify({ parentImage, componentName, blockDeviceMappings }))}`;
+        // Stable name per variant so the lifecycle policy can select it; the version carries a hash
+        // of the content, since recipes are immutable per name+version.
+        const recipeHash = short(JSON.stringify({ parentImage, componentName, blockDeviceMappings }));
         const recipe = new imagebuilder.CfnImageRecipe(this, `Recipe-${v}`, {
-          name: recipeName,
-          version: "1.0.0",
+          name: `codespace-${v}`,
+          version: `1.0.${parseInt(recipeHash.slice(0, 7), 16)}`,
           description: `Codespace ${v} workspace image`,
           parentImage,
           components: [{ componentArn: component.attrArn, parameters: [{ name: "Variant", value: [v] }] }],
@@ -299,7 +302,36 @@ export class CodespaceStack extends Stack {
           tags: { app: TAG_APP.Value, variant: v },
         });
         pipelines[v].node.addDependency(executionRole);
+        recipes.push(recipe);
       }
+
+      // ---- AMI retention ----
+      // Keeps the 2 newest images per recipe version (COUNT counts per version) and deletes the
+      // rest: the Image Builder image, its output AMIs in every distribution region, and their
+      // snapshots. Runs daily on Image Builder's schedule. The newest image is the one
+      // /codespace/ami/<variant> points to, since each successful build rewrites the parameter.
+      const lifecycleRole = new iam.Role(this, "ImageLifecycleRole", {
+        assumedBy: new iam.ServicePrincipal("imagebuilder.amazonaws.com"),
+        description: "Codespace Image Builder lifecycle policy (AMI retention)",
+        managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/EC2ImageBuilderLifecycleExecutionPolicy")],
+      });
+      const lifecycle = new imagebuilder.CfnLifecyclePolicy(this, "AmiRetention", {
+        name: "codespace-ami-retention",
+        description: "Keep the newest 2 images per Codespace recipe version; delete older AMIs (all regions) and snapshots",
+        executionRole: lifecycleRole.roleArn,
+        resourceType: "AMI_IMAGE",
+        status: "ENABLED",
+        policyDetails: [
+          {
+            action: { type: "DELETE", includeResources: { amis: true, snapshots: true } },
+            filter: { type: "COUNT", value: 2 },
+          },
+        ],
+        resourceSelection: { recipes: IMAGE_VARIANTS.map((v) => ({ name: `codespace-${v}`, semanticVersion: "x.x.x" })) },
+        tags: { app: TAG_APP.Value },
+      });
+      for (const r of recipes) lifecycle.node.addDependency(r);
+      lifecycle.node.addDependency(lifecycleRole);
 
       new CfnOutput(this, "PipelineArns", {
         value: IMAGE_VARIANTS.map((v) => pipelines[v].attrArn).join(","),
@@ -443,6 +475,34 @@ export function appPolicyDocument(partition: string, account: string): iam.Polic
         sid: "RunInstancesUntaggable",
         actions: ["ec2:RunInstances"],
         resources: [ec2Arn("network-interface/*"), `arn:${partition}:ec2:*::image/*`, `arn:${partition}:ec2:*::snapshot/*`],
+      }),
+      // Cold storage: snapshot a stopped workspace's root volume, restore from it, delete it.
+      // CreateSnapshot authorizes the source volume (resource tags) and the new snapshot (request
+      // tags) separately, per the EC2 service reference. RunInstances from a snapshot root is
+      // covered by RunInstancesUntaggable (snapshot/*).
+      new iam.PolicyStatement({
+        sid: "SnapshotTaggedVolume",
+        actions: ["ec2:CreateSnapshot"],
+        resources: [ec2Arn("volume/*")],
+        conditions: tagged,
+      }),
+      new iam.PolicyStatement({
+        sid: "SnapshotTaggedOnCreate",
+        actions: ["ec2:CreateSnapshot"],
+        resources: [`arn:${partition}:ec2:*::snapshot/*`],
+        conditions: { StringEquals: { [`aws:RequestTag/${TAG_APP.Key}`]: TAG_APP.Value } },
+      }),
+      new iam.PolicyStatement({
+        sid: "TagSnapshotOnCreate",
+        actions: ["ec2:CreateTags"],
+        resources: [`arn:${partition}:ec2:*::snapshot/*`],
+        conditions: { StringEquals: { "ec2:CreateAction": "CreateSnapshot" } },
+      }),
+      new iam.PolicyStatement({
+        sid: "DeleteTaggedSnapshot",
+        actions: ["ec2:DeleteSnapshot"],
+        resources: [`arn:${partition}:ec2:*::snapshot/*`],
+        conditions: tagged,
       }),
       new iam.PolicyStatement({
         sid: "TagOnCreate",

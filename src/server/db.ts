@@ -95,8 +95,14 @@ function migrate(d: DatabaseSync) {
     ["az", "TEXT"],
     ["hibernate", "INTEGER NOT NULL DEFAULT 0"],
     ["instance_started_at", "INTEGER"],
+    // Cold storage. archive_snapshot_id without archived_at is an archive still in progress.
+    ["stopped_at", "INTEGER"],
+    ["archive_snapshot_id", "TEXT"],
+    ["archived_at", "INTEGER"],
   ];
   for (const [name, type] of ec2Cols) if (!cols.has(name)) d.exec(`ALTER TABLE workspaces ADD COLUMN ${name} ${type}`);
+  // Rows already stopped before stopped_at existed: count from their last activity.
+  if (!cols.has("stopped_at")) d.exec("UPDATE workspaces SET stopped_at = last_activity_at WHERE state = 'stopped'");
   d.exec(`UPDATE workspaces SET state = 'error', error = 'Created on Modal, which this version no longer supports. Delete it.'
     WHERE instance_type IS NULL`);
 }
@@ -112,7 +118,8 @@ function recoverFromRestart(d: DatabaseSync) {
       WHERE state IN ('creating', 'setting up');
   `);
   // A leftover 'starting' or 'stopping' isn't an error: the instance kept going without us, and
-  // syncState reads its real state from EC2 the next time anyone looks.
+  // syncState reads its real state from EC2 the next time anyone looks. A leftover 'archiving'
+  // is resumed by the reaper's next tick: every step of the archive is driven from the row.
 }
 
 export function now() {

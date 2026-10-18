@@ -11,6 +11,9 @@ import {
   DescribeInstanceTypeOfferingsCommand,
   DescribeSpotPriceHistoryCommand,
   GetSpotPlacementScoresCommand,
+  CreateSnapshotCommand,
+  DescribeSnapshotsCommand,
+  DeleteSnapshotCommand,
   type Instance,
   type InstanceStateName,
   type ResourceType,
@@ -255,7 +258,18 @@ export function rootVolumeGb(m: Machine, diskGb: number): number {
   return diskGb + (m.hibernate ? Math.ceil(m.memoryGib) : 0);
 }
 
-export async function launchInstance(opts: { workspaceId: string; machine: Machine; market: Market; diskGb: number; region?: string }): Promise<Launched> {
+/**
+ * `snapshotId` restores a cold-stored workspace: the root volume comes from that snapshot instead
+ * of the AMI's, in any AZ, never smaller than the snapshot.
+ */
+export async function launchInstance(opts: {
+  workspaceId: string;
+  machine: Machine;
+  market: Market;
+  diskGb: number;
+  region?: string;
+  snapshotId?: string;
+}): Promise<Launched> {
   const { workspaceId, machine: m, market } = opts;
   const region = opts.region ?? awsRegion();
   const ctx = { type: m.type, market, region };
@@ -265,7 +279,12 @@ export async function launchInstance(opts: { workspaceId: string; machine: Machi
     const root = await rootDevice(amiId, region);
     const device = root.name;
     // GPU AMIs (the Deep Learning base) ship a root snapshot bigger than the smallest disk step.
-    const volumeGb = rootVolumeGb(m, Math.max(opts.diskGb, root.snapshotGb));
+    let volumeGb = rootVolumeGb(m, Math.max(opts.diskGb, root.snapshotGb));
+    if (opts.snapshotId) {
+      const snap = await snapshotState(opts.snapshotId, region);
+      if (snap?.state !== "completed") throw new Error(`Snapshot ${opts.snapshotId} is ${snap?.state ?? "gone"}, so the workspace can't be restored from it.`);
+      volumeGb = Math.max(volumeGb, snap.volumeGb);
+    }
     const tags: Tag[] = [{ ...TAG_APP }, { Key: TAG_WORKSPACE, Value: workspaceId }, { Key: "Name", Value: `codespace-${workspaceId}` }];
     const resources: ResourceType[] = ["instance", "volume", ...(market === "spot" ? (["spot-instances-request"] as const) : [])];
     const nonce = Date.now().toString(36);
@@ -279,7 +298,9 @@ export async function launchInstance(opts: { workspaceId: string; machine: Machi
             MinCount: 1,
             MaxCount: 1,
             SubnetId: p.subnetId,
-            BlockDeviceMappings: [{ DeviceName: device, Ebs: { VolumeSize: volumeGb, VolumeType: "gp3", Encrypted: true, DeleteOnTermination: true } }],
+            BlockDeviceMappings: [
+              { DeviceName: device, Ebs: { SnapshotId: opts.snapshotId, VolumeSize: volumeGb, VolumeType: "gp3", Encrypted: true, DeleteOnTermination: true } },
+            ],
             HibernationOptions: m.hibernate ? { Configured: true } : undefined,
             InstanceMarketOptions:
               market === "spot"
@@ -400,6 +421,56 @@ export async function terminateInstance(id: string, region = awsRegion()) {
   } catch (err) {
     if (code(err) === "InvalidInstanceID.NotFound") return;
     throw explainAwsError(err, { region });
+  }
+}
+
+/** The stop may have left a hibernation image on the root volume (any stop not known to be a plain one counts). */
+export function maybeHibernated(info: InstanceInfo): boolean {
+  return info.hibernate && info.stateReason !== "Client.UserInitiatedShutdown";
+}
+
+// ---- Root snapshots (cold storage) ------------------------------------------
+
+/** Snapshots the instance's root volume, tagged like the instance. Returns the snapshot ID at once; it completes later. */
+export async function createRootSnapshot(instanceId: string, workspaceId: string, region = awsRegion()): Promise<string> {
+  const i = await rawInstance(instanceId, region);
+  const volumeId = i?.BlockDeviceMappings?.find((b) => b.DeviceName === i.RootDeviceName)?.Ebs?.VolumeId;
+  if (!volumeId) throw new Error(`Couldn't find the root volume of ${instanceId}`);
+  try {
+    const res = await ec2(region).send(
+      new CreateSnapshotCommand({
+        VolumeId: volumeId,
+        Description: `codespace ${workspaceId} cold storage`,
+        TagSpecifications: [
+          { ResourceType: "snapshot", Tags: [{ ...TAG_APP }, { Key: TAG_WORKSPACE, Value: workspaceId }, { Key: "Name", Value: `codespace-${workspaceId}` }] },
+        ],
+      }),
+    );
+    if (!res.SnapshotId) throw new Error("CreateSnapshot returned no snapshot");
+    return res.SnapshotId;
+  } catch (err) {
+    throw explainAwsError(err, { region });
+  }
+}
+
+export type SnapshotInfo = { state: string /* pending | completed | error | recoverable... */; progress: string | null; volumeGb: number; message: string | null };
+
+/** null once the snapshot doesn't exist. */
+export async function snapshotState(id: string, region = awsRegion()): Promise<SnapshotInfo | null> {
+  try {
+    const s = (await ec2(region).send(new DescribeSnapshotsCommand({ SnapshotIds: [id] }))).Snapshots?.[0];
+    return s ? { state: s.State ?? "pending", progress: s.Progress ?? null, volumeGb: s.VolumeSize ?? 0, message: s.StateMessage ?? null } : null;
+  } catch (err) {
+    if (/^InvalidSnapshot\.(NotFound|Malformed)/.test(code(err))) return null;
+    throw explainAwsError(err, { region });
+  }
+}
+
+export async function deleteSnapshot(id: string, region = awsRegion()) {
+  try {
+    await ec2(region).send(new DeleteSnapshotCommand({ SnapshotId: id }));
+  } catch (err) {
+    if (!/^InvalidSnapshot\.NotFound/.test(code(err))) throw explainAwsError(err, { region });
   }
 }
 

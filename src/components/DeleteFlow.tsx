@@ -5,7 +5,11 @@ import { api, ApiError, type RepoRisk } from "@/lib/api";
 import { Button, Input, Modal } from "./ui";
 
 /** Deleting checks the instance for uncommitted, unpushed or stashed work first. */
-export function DeleteWorkspace({ id, name, onDone, onClose }: { id: string; name: string; onDone: () => void; onClose: () => void }) {
+/**
+ * An archived workspace has no instance to check, so the API answers 409 with a cold-storage
+ * message; that lands in the same "can't verify, type the name to force" step as other errors.
+ */
+export function DeleteWorkspace({ id, name, archived, onDone, onClose }: { id: string; name: string; archived?: boolean; onDone: () => void; onClose: () => void }) {
   const [phase, setPhase] = useState<"confirm" | "checking" | "risky" | "deleting">("confirm");
   const [risks, setRisks] = useState<RepoRisk[]>([]);
   const [error, setError] = useState("");
@@ -32,7 +36,11 @@ export function DeleteWorkspace({ id, name, onDone, onClose }: { id: string; nam
     <Modal title={`Delete ${name}`} onClose={onClose}>
       {phase === "confirm" && (
         <div className="space-y-3">
-          <p>This terminates the instance and permanently deletes its disk. grogan.codes checks for work that isn&apos;t pushed first.</p>
+          <p>
+            {archived
+              ? "This permanently deletes the workspace's cold-storage snapshot, which is its disk. A cold workspace can't be checked for unpushed work without restoring it first."
+              : "This terminates the instance and permanently deletes its disk. grogan.codes checks for work that isn't pushed first."}
+          </p>
           <div className="flex justify-end gap-2">
             <Button onClick={onClose}>Cancel</Button>
             <Button variant="danger" onClick={() => attempt(false)}>
@@ -44,7 +52,7 @@ export function DeleteWorkspace({ id, name, onDone, onClose }: { id: string; nam
       {(phase === "checking" || phase === "deleting") && <p className="text-muted">{phase === "checking" ? "Checking repos for unsaved work…" : "Deleting…"}</p>}
       {phase === "risky" && (
         <div className="space-y-3">
-          {error && <p className="text-bad">{error}</p>}
+          {error && <p className={archived ? "text-warn" : "text-bad"}>{error}</p>}
           {risks.length > 0 && (
             <>
               <p className="text-warn">This work only exists on the instance’s disk and will be lost:</p>

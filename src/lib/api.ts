@@ -38,6 +38,9 @@ export type Workspace = {
   loadout: string;
   created_at: number;
   last_activity_at: number;
+  /** In cold storage: the instance is gone and the disk lives on as a snapshot until the next start. */
+  archived: boolean;
+  archived_at: number | null;
   /** null for rows created on Modal, which have no instance type. */
   machine: Machine | null;
   repos: Repo[];
@@ -95,6 +98,8 @@ export function gpuShare(gpu: NonNullable<Machine["gpu"]>) {
 export function diskUse(w: Pick<Workspace, "disk_gb" | "disk_used_mb">) {
   return w.disk_gb && w.disk_used_mb != null ? w.disk_used_mb / 1024 / w.disk_gb : null;
 }
+
+export const RESTORE_HINT = "Restores from cold storage: a new instance is built from the disk snapshot, which takes a few extra minutes. Files are kept; running processes aren't.";
 
 /** "$0.18" or "$0.0336" for prices under ten cents, so cheap types don't all read "$0.03". */
 export function dollars(n: number) {

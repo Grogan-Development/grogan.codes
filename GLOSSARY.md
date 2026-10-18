@@ -26,6 +26,10 @@ _Avoid_: Profile, config, setup
 The EC2 instance that hosts one workspace. Its root volume is the workspace's disk. A stopped workspace is a stopped instance whose disk persists; a hibernated one also kept its memory on that disk. It is an infrastructure term and never names the user-facing concept.
 _Avoid_: Sandbox (the Modal-era term), VM, container, box
 
+**Cold storage**:
+Where a long-stopped workspace's disk goes: the app snapshots the disk and terminates the instance, so only the data written is billed. Starting a cold workspace restores it onto a new instance; files are kept, running processes are not. A cold workspace is still stopped, not deleted.
+_Avoid_: Archive (except as the "Archive now" action that moves a workspace there), backup
+
 **Market**:
 How a workspace's instance is bought: **on-demand** (full price, runs until stopped) or **spot** (discounted spare capacity that AWS can reclaim with 2 minutes' notice, which stops or hibernates the instance and keeps its disk). Chosen when the workspace is created.
 

@@ -79,6 +79,7 @@ const STATE_COLORS: Record<string, string> = {
   ready: "bg-ok",
   idle: "bg-faint",
   stopped: "bg-faint",
+  archiving: "bg-info",
   paused: "bg-info",
   archived: "bg-faint",
   waiting: "bg-warn",
@@ -87,6 +88,7 @@ const STATE_COLORS: Record<string, string> = {
 };
 
 export function StateDot({ state }: { state: string }) {
+  // Every "-ing" state is transient (creating, starting, stopping, archiving…) except running.
   const busy = /ing$/.test(state) && state !== "running";
   return (
     <span
@@ -102,6 +104,19 @@ export function MarketTag({ market }: { market: string }) {
   return (
     <span title="Spot: AWS can reclaim it with 2 minutes' notice. The disk is kept." className="rounded-md bg-warn/15 px-1.5 py-px text-[11px] font-semibold text-warn">
       spot
+    </span>
+  );
+}
+
+/** Shown on a workspace in cold storage, with when it moved there. */
+export function ColdTag({ archivedAt }: { archivedAt: number | null }) {
+  const when = archivedAt ? new Date(archivedAt).toLocaleString() : "an unknown time";
+  return (
+    <span
+      title={`In cold storage since ${when}. The instance was removed and the disk kept as a snapshot; starting restores it.`}
+      className="rounded-md bg-info/15 px-1.5 py-px text-[11px] font-semibold text-info"
+    >
+      Cold
     </span>
   );
 }

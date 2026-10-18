@@ -1,5 +1,5 @@
 import { getSecret, githubToken, setSecret } from "@/server/secrets";
-import { awsProfile, awsRegion, awsRegions, checkAwsCredentials, resetAws, type AwsStatus } from "@/server/aws/config";
+import { awsProfile, awsRegion, awsRegions, checkAwsCredentials, coldAfterDays, resetAws, type AwsStatus } from "@/server/aws/config";
 import { regionsStatus } from "@/server/aws/ec2";
 import { hasSsmPlugin } from "@/server/remote";
 import { handle, json } from "@/server/http";
@@ -29,11 +29,15 @@ export const GET = handle(async () => {
     claude: !!getSecret("claude-oauth-token"),
     github: !!githubToken(),
     ssmPlugin,
+    coldAfterDays: coldAfterDays(),
   });
 });
 
 export const POST = handle(async (req: Request) => {
-  const body = (await req.json()) as { awsProfile?: string; awsRegions?: string; claudeToken?: string };
+  const body = (await req.json()) as { awsProfile?: string; awsRegions?: string; claudeToken?: string; coldAfterDays?: number | string };
+  const cold = body.coldAfterDays === undefined || body.coldAfterDays === "" ? undefined : Number(body.coldAfterDays);
+  if (cold !== undefined && !(Number.isInteger(cold) && cold >= 0 && cold <= 365))
+    return json({ error: "Cold storage days must be a whole number from 0 to 365" }, 400);
   const profile = body.awsProfile?.trim();
   if (profile !== undefined && !PROFILE.test(profile)) return json({ error: "That doesn't look like an AWS profile name" }, 400);
   // Comma list; the first is the home region, where images are built.
@@ -53,6 +57,7 @@ export const POST = handle(async (req: Request) => {
     awsChanged = true;
   }
   if (awsChanged) resetAws();
+  if (cold !== undefined && cold !== coldAfterDays()) setSecret("cold-after-days", String(cold));
   if (body.claudeToken?.trim()) setSecret("claude-oauth-token", body.claudeToken.trim());
   return json({ ok: true });
 });
