@@ -188,6 +188,9 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 AcceptEnv CLAUDE_* CS_* MCP_* DISABLE_* ANTHROPIC_*
+# The app multiplexes every thread, port forward and command over one connection per workspace;
+# the default of 10 channels is too low.
+MaxSessions 64
 EOF
 grep -Eq '^\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config \
   || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config

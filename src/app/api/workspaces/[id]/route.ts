@@ -22,10 +22,17 @@ export const PATCH = handle(async (req: Request, { params }: Ctx) => {
 export const DELETE = handle(async (req: Request, { params }: Ctx) => {
   const { id } = await params;
   // Without an instance (Modal-era rows, setup that never launched) there is nothing to lose.
-  const force = new URL(req.url).searchParams.get("force") === "1" || !getWorkspace(id).instance_id;
+  const w = getWorkspace(id);
+  const force = new URL(req.url).searchParams.get("force") === "1" || !w.instance_id;
   if (!force) {
     const risks = await unsavedWork(id).catch(() => null);
-    if (risks === null) return json({ error: "Could not check for unsaved work (is the workspace running?). Start it first, or force delete." }, 409);
+    if (risks === null) {
+      const error =
+        w.state === "stopped"
+          ? "The workspace is stopped. Start it to check for unpushed work, or force delete."
+          : "Could not check for unsaved work (is the workspace running?). Start it first, or force delete.";
+      return json({ error }, 409);
+    }
     if (risks.length) return json({ error: "unsaved", risks }, 409);
   }
   await deleteWorkspace(id);

@@ -47,7 +47,8 @@ export function Dashboard() {
   }, [load]);
 
   const act = async (id: string, action: "start" | "stop") => {
-    await api(`/api/workspaces/${id}/action`, { method: "POST", json: { action } });
+    // A 409 means another action is already running; other failures land on the row's error.
+    await api(`/api/workspaces/${id}/action`, { method: "POST", json: { action } }).catch(() => {});
     load();
   };
 

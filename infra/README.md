@@ -145,6 +145,7 @@ What the policy allows, all region-agnostic:
   - `CreateTags` only as part of `RunInstances`
 - **Lifecycle** (start, stop, terminate, modify, cancel spot) only on resources tagged `app=codespace`.
 - **`iam:PassRole`** only on roles under `/codespace/`, and only to EC2.
+- **`iam:CreateServiceLinkedRole`** only for `AWSServiceRoleForEC2Spot` (`spot.amazonaws.com`). The first spot launch in an account that has never used spot creates that role, and fails with `AuthFailure.ServiceLinkedRoleCreationNotPermitted` without this permission.
 - **SSM parameters:** read `/codespace/*` and `/aws/service/*`.
 - **Sessions:**
   - `ssm:StartSession` on instances tagged `app=codespace` and the `AWS-StartSSHSession` document

@@ -71,11 +71,14 @@ export function hasSsmPlugin(): boolean {
   return which("session-manager-plugin") !== null;
 }
 
+/** Missing local tooling: retrying can't help, so waitForRemote gives up at once. */
+class ToolingError extends Error {}
+
 function preflight(): string {
   const aws = which("aws");
-  if (!aws) throw new Error("The AWS CLI v2 isn't installed (no `aws` on PATH). Install it with `brew install awscli`.");
+  if (!aws) throw new ToolingError("The AWS CLI v2 isn't installed (no `aws` on PATH). Install it with `brew install awscli`.");
   if (!hasSsmPlugin()) {
-    throw new Error(
+    throw new ToolingError(
       "The AWS Session Manager plugin isn't installed (no `session-manager-plugin` on PATH). Install it with `brew install --cask session-manager-plugin`.",
     );
   }
@@ -241,7 +244,10 @@ async function execOn(instanceId: string, command: string, opts: Omit<ExecOption
   const conn = await connection(instanceId);
   try {
     stream = await openExec(conn.client, full, opts.env);
-  } catch {
+  } catch (err) {
+    // A channel refused by a live server (sshd's MaxSessions, say) must not take down the
+    // connection that every other command and Claude turn on this workspace shares.
+    if (/open failed|prohibited|resource shortage/i.test(err instanceof Error ? err.message : String(err))) throw err;
     // A connection that died between pooling and use: drop it and try once on a fresh one.
     dropConnection(instanceId);
     stream = await openExec((await connection(instanceId)).client, full, opts.env);
@@ -314,6 +320,7 @@ export async function waitForRemote(instanceId: string, timeoutMs = 300_000): Pr
       last = new Error(`probe exited ${res.exitCode}: ${res.output.slice(-500)}`);
       dropConnection(instanceId);
     } catch (err) {
+      if (err instanceof ToolingError) throw err;
       last = err;
     }
     if (Date.now() + delay > deadline) {

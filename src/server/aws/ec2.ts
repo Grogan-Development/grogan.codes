@@ -79,13 +79,39 @@ function requiredParams(): string[] {
 }
 
 export async function infraStatus(): Promise<{ ok: boolean; missing: string[] }> {
+  const region = awsRegion();
   try {
-    const p = await infraParams(awsRegion());
+    const p = await infraParams(region);
     const missing = requiredParams().filter((n) => !p[n]);
+    const amis = IMAGE_VARIANTS.map((v) => ({ name: PARAMS.amiId(v), id: p[PARAMS.amiId(v)] })).filter((a) => a.id);
+    const owned = await ownedAmis(amis.map((a) => a.id), region);
+    for (const a of amis) if (!owned.has(a.id)) missing.push(unbuilt(a.name));
     return { ok: missing.length === 0, missing };
   } catch {
     return { ok: false, missing: requiredParams() };
   }
+}
+
+const unbuilt = (paramName: string) => `${paramName} (not built yet: run the Image Builder pipeline)`;
+
+const owned = new Set<string>(); // an AMI's owner never changes, so hits are cached for good
+
+/**
+ * Until Image Builder has run, the AMI params hold the stock parent image, which lacks the
+ * workspace setup (sshd AcceptEnv, Claude Code...). Only images in this account count as built.
+ */
+async function ownedAmis(ids: string[], region: string): Promise<Set<string>> {
+  // One call per image: a single unknown ID would fail a batched DescribeImages for all of them.
+  const check = async (id: string) => {
+    try {
+      const res = await ec2(region).send(new DescribeImagesCommand({ ImageIds: [id], Owners: ["self"] }));
+      if (res.Images?.length) owned.add(id);
+    } catch (err) {
+      if (!/^InvalidAMIID/.test(code(err))) throw err; // a missing AMI just isn't ours
+    }
+  };
+  await Promise.all(ids.filter((id) => !owned.has(id)).map(check));
+  return new Set(ids.filter((id) => owned.has(id)));
 }
 
 async function param(name: string, region: string): Promise<string> {
@@ -221,6 +247,7 @@ export async function launchInstance(opts: { workspaceId: string; machine: Machi
   const ctx = { type: m.type, market, region };
   try {
     const [templateId, amiId] = await Promise.all([param(PARAMS.launchTemplateId(m.variant), region), param(PARAMS.amiId(m.variant), region)]);
+    if (!(await ownedAmis([amiId], region)).has(amiId)) throw new Error(`Can't launch: ${unbuilt(PARAMS.amiId(m.variant))}.`);
     const root = await rootDevice(amiId, region);
     const device = root.name;
     // GPU AMIs (the Deep Learning base) ship a root snapshot bigger than the smallest disk step.
@@ -289,7 +316,10 @@ async function rawInstance(id: string, region: string): Promise<Instance | null>
 /** null once the instance is gone entirely (terminated instances drop out after about an hour). */
 export async function describeInstance(id: string, region = awsRegion()): Promise<InstanceInfo | null> {
   const i = await rawInstance(id, region);
-  if (!i) return null;
+  return i ? info(i) : null;
+}
+
+function info(i: Instance): InstanceInfo {
   return {
     state: (i.State?.Name ?? "pending") as InstanceStateName,
     stateReason: i.StateReason?.Code ?? null,
@@ -298,6 +328,24 @@ export async function describeInstance(id: string, region = awsRegion()): Promis
     az: i.Placement?.AvailabilityZone ?? null,
     hibernate: i.HibernationOptions?.Configured ?? false,
   };
+}
+
+/** Several instances in one call. Missing IDs (gone, or too new to be listed yet) map to null. */
+export async function describeInstances(ids: string[], region = awsRegion()): Promise<Map<string, InstanceInfo | null>> {
+  const out = new Map<string, InstanceInfo | null>(ids.map((id) => [id, null]));
+  if (!ids.length) return out;
+  try {
+    let NextToken: string | undefined;
+    do {
+      // A filter rather than InstanceIds, which fails the whole call if one ID is unknown.
+      const res = await ec2(region).send(new DescribeInstancesCommand({ Filters: [{ Name: "instance-id", Values: ids }], NextToken }));
+      for (const r of res.Reservations ?? []) for (const i of r.Instances ?? []) if (i.InstanceId) out.set(i.InstanceId, info(i));
+      NextToken = res.NextToken || undefined;
+    } while (NextToken);
+  } catch (err) {
+    throw explainAwsError(err, { region });
+  }
+  return out;
 }
 
 /** AWS stopped (or hibernated) it to reclaim spot capacity. */
@@ -341,13 +389,26 @@ export async function terminateInstance(id: string, region = awsRegion()) {
   }
 }
 
-/** Polls until the instance reaches `state`; throws if it ends up terminated or gone instead. */
+/** DescribeInstances is eventually consistent: a just-launched instance can be NotFound for a while. */
+export const NOT_FOUND_GRACE_MS = 60_000;
+
+/**
+ * Polls until the instance reaches `state`; throws if it ends up terminated or gone instead.
+ * NotFound is tolerated until the instance has been seen once, for up to NOT_FOUND_GRACE_MS.
+ */
 export async function waitForState(id: string, state: InstanceStateName, opts: { timeoutMs?: number; region?: string } = {}): Promise<InstanceInfo> {
   const region = opts.region ?? awsRegion();
-  const deadline = Date.now() + (opts.timeoutMs ?? 600_000);
+  const t0 = Date.now();
+  const deadline = t0 + (opts.timeoutMs ?? 600_000);
+  let seen = false;
   for (;;) {
     const info = await describeInstance(id, region);
     if (info?.state === state) return info;
+    if (!info && !seen && Date.now() - t0 < NOT_FOUND_GRACE_MS) {
+      await new Promise((r) => setTimeout(r, 3000));
+      continue;
+    }
+    seen = true;
     if (!info || (info.state === "terminated" && state !== "terminated")) {
       throw new Error(`Instance ${id} was terminated${info?.stateMessage ? `: ${info.stateMessage}` : ""}`);
     }

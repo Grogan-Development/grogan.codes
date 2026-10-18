@@ -9,7 +9,9 @@ import {
   stopInstance,
   terminateInstance,
   describeInstance,
+  describeInstances,
   waitForState,
+  NOT_FOUND_GRACE_MS,
   spotInterrupted,
   rootVolumeGb,
   type InstanceInfo,
@@ -154,17 +156,22 @@ export const SETUP_FAILED = "setup failed";
 
 const MODAL_ERA = "Created on Modal, which this version no longer supports. Delete it.";
 
-/** Workspaces with an EC2 call in flight in this process; syncState leaves those alone. */
-const inflight = new Set<string>();
+/** The provision, start or stop running for each workspace in this process; syncState leaves those alone. */
+const inflight = new Map<string, Promise<unknown>>();
 
-async function guarded<T>(id: string, fn: () => Promise<T>): Promise<T> {
-  if (inflight.has(id)) throw new Error("Workspace is busy with another start or stop. Try again in a moment.");
-  inflight.add(id);
-  try {
-    return await fn();
-  } finally {
-    inflight.delete(id);
+export class BusyError extends Error {
+  constructor() {
+    super("Workspace is busy with another start, stop or setup. Try again in a moment.");
   }
+}
+
+export const isBusy = (id: string) => inflight.has(id);
+
+function guarded<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  if (inflight.has(id)) return Promise.reject(new BusyError());
+  const p = fn().finally(() => inflight.delete(id));
+  inflight.set(id, p);
+  return p;
 }
 
 /** The disk size the user picked: a launched row's disk_gb also holds the hibernation room. */
@@ -176,7 +183,14 @@ function requestedDiskGb(w: Workspace, m: Machine): number {
 /** Launch a new instance, or reuse the one a failed setup left behind. */
 async function bootInstance(w: Workspace): Promise<string> {
   const region = regionOf(w);
-  const existing = w.instance_id ? await describeInstance(w.instance_id, region) : null;
+  let existing = w.instance_id ? await describeInstance(w.instance_id, region) : null;
+  // Launched moments ago and not listed yet: wait for it rather than launching a second one.
+  if (!existing && w.instance_id && w.instance_started_at && now() - w.instance_started_at < NOT_FOUND_GRACE_MS) {
+    for (const end = now() + NOT_FOUND_GRACE_MS; !existing && now() < end; ) {
+      await new Promise((r) => setTimeout(r, 3000));
+      existing = await describeInstance(w.instance_id, region);
+    }
+  }
   if (existing && existing.state !== "terminated" && existing.state !== "shutting-down") {
     if (existing.state === "stopping") await waitForState(w.instance_id!, "stopped", { region });
     if (existing.state === "stopping" || existing.state === "stopped") await startInstance(w.instance_id!, region);
@@ -210,7 +224,10 @@ async function provision(id: string) {
     });
     for (const repo of listRepos(id)) if (repo.state !== "ready") await cloneRepo(id, repo.id);
   } catch (err) {
+    if (err instanceof BusyError) return;
+    // Tooling errors from remote.ts ("The AWS CLI v2 isn't installed...") arrive as-is and are shown verbatim.
     setState(id, SETUP_FAILED, String(err instanceof Error ? err.message : err));
+    touch(id); // the reaper stops a failed setup's instance once it has sat idle this long
   }
 }
 
@@ -323,6 +340,7 @@ async function start(id: string): Promise<Remote> {
       const r = await waitForRemote(w.instance_id);
       db().prepare("UPDATE workspaces SET instance_started_at = ? WHERE id = ?").run(now(), id);
       setState(id, "started");
+      touch(id); // or the reaper would pause it again on its next pass
       return r;
     } catch (err) {
       await reconcile(getWorkspace(id), err instanceof Error ? err.message : String(err));
@@ -355,9 +373,11 @@ export async function lifecycle(id: string, action: "start" | "pause" | "stop") 
   try {
     if (action === "start") {
       const w = await syncState(id);
-      if (w.state !== "started") await start(id);
+      if (w.state === SETUP_FAILED) await provision(id); // setup never finished, so bootstrap again
+      else if (w.state !== "started") await start(id);
     } else await stop(id, action === "pause");
   } catch (err) {
+    if (err instanceof BusyError) throw err; // another action owns the state; leave it alone
     // start/stop already recorded EC2's real state with the message; only fill in what they couldn't.
     const w = getWorkspace(id);
     if (!w.error) setState(id, w.state === "started" || w.state === "stopped" ? w.state : "error", String(err instanceof Error ? err.message : err));
@@ -385,6 +405,8 @@ async function reconcile(w: Workspace, error: string | null = null, info?: Insta
   if (!w.instance_id) return w;
   info = info === undefined ? await describeInstance(w.instance_id, regionOf(w)) : info;
   const keep = (s: string) => (w.state === s ? w.error : null); // e.g. the spot message on a stopped row
+  // DescribeInstances lags RunInstances/StartInstances, so "not found" right after either means "not listed yet".
+  if (!info && w.instance_started_at && now() - w.instance_started_at < NOT_FOUND_GRACE_MS) return w;
   if (!info || info.state === "terminated" || info.state === "shutting-down") {
     forgetRemote(w.instance_id);
     setState(w.id, "error", TERMINATED);
@@ -422,7 +444,13 @@ export async function ensureStarted(id: string): Promise<Remote> {
   if (w.state === SETUP_FAILED) throw new Error(`Workspace setup failed: ${w.error ?? "unknown error"}. Retry setup first.`);
   if ((w.state === "started" || w.state === "setting up") && w.instance_id) return remote(w.instance_id);
   if (w.state === "error" && w.error === TERMINATED) throw new Error(TERMINATED);
-  if (SETUP_STATES.includes(w.state) || inflight.has(id)) throw new Error(`Workspace is ${w.state}. Try again in a moment.`);
+  // A provision or start already under way: wait for it, then look again.
+  const pending = inflight.get(id);
+  if (pending) {
+    await pending.catch(() => {});
+    return ensureStarted(id);
+  }
+  if (SETUP_STATES.includes(w.state)) throw new Error(`Workspace is ${w.state}. Try again in a moment.`);
   return start(id);
 }
 
@@ -449,19 +477,47 @@ async function checkDisk(running: Workspace[]) {
   }
 }
 
+const isIdle = (w: Workspace) => now() - w.last_activity_at > w.idle_minutes * 60_000;
+
+/**
+ * Every row with an instance, whatever its state, is checked against EC2 each minute: that
+ * catches spot reclaims, console stops, persistent spot requests AWS restarted on its own, and
+ * a failed setup's instance left running. Nothing that bills is left unwatched.
+ */
 async function reap() {
-  const rows = db().prepare("SELECT * FROM workspaces WHERE state = 'started' AND instance_id IS NOT NULL").all() as Workspace[];
+  const rows = (db().prepare("SELECT * FROM workspaces WHERE instance_id IS NOT NULL AND instance_type IS NOT NULL").all() as Workspace[]).filter(
+    (w) => !inflight.has(w.id) && w.state !== "creating" && w.state !== "setting up",
+  );
+  const byRegion = new Map<string, Workspace[]>();
+  for (const w of rows) byRegion.set(regionOf(w), [...(byRegion.get(regionOf(w)) ?? []), w]);
   const running: Workspace[] = [];
-  for (const w of rows) {
-    // Catches spot reclaims and console stops within a minute, even with no one looking.
-    const synced = await syncState(w.id).catch(() => w);
-    if (synced.state === "started") running.push(synced);
+  for (const [region, ws] of byRegion) {
+    let infos: Map<string, InstanceInfo | null>;
+    try {
+      infos = await describeInstances(ws.map((w) => w.instance_id!), region);
+    } catch (err) {
+      console.error(`[reaper] ${region}`, err);
+      continue;
+    }
+    for (const w of ws) {
+      const info = infos.get(w.instance_id!) ?? null;
+      const live = info?.state === "running" || info?.state === "pending";
+      if (w.state === SETUP_FAILED) {
+        // Keep the failed state (retry bootstraps and starts a stopped instance), but stop the billing.
+        if (live && isIdle(w)) {
+          forgetRemote(w.instance_id!);
+          await stopInstance(w.instance_id!, {}, region).catch((err) => console.error(`[reaper] stop ${w.id}`, err));
+        }
+        continue;
+      }
+      const synced = await reconcile(w, null, info).catch(() => w);
+      if (synced.state === "started") running.push(synced);
+    }
   }
   await checkDisk(running);
   for (const w of running) {
     const busy = db().prepare("SELECT 1 FROM threads WHERE workspace_id = ? AND status IN ('starting', 'running', 'waiting')").get(w.id);
-    const idle = now() - w.last_activity_at > w.idle_minutes * 60_000;
-    if (idle && !busy) await lifecycle(w.id, "pause");
+    if (isIdle(w) && !busy) await lifecycle(w.id, "pause").catch(() => {});
   }
 }
 

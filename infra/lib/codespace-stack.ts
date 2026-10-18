@@ -437,11 +437,22 @@ export function appPolicyDocument(partition: string, account: string): iam.Polic
         resources: [ec2Arn("instance/*")],
         conditions: tagged,
       }),
+      // The AWS Service Reference (servicereference.us-east-1.amazonaws.com/v1/ec2/ec2.json,
+      // checked 2026-10-18) lists spot-instances-request as CancelSpotInstanceRequests' resource
+      // with aws:ResourceTag/${TagKey}, so the tag condition holds. The app tags the request.
       new iam.PolicyStatement({
         sid: "CancelSpot",
         actions: ["ec2:CancelSpotInstanceRequests"],
         resources: [ec2Arn("spot-instances-request/*")],
         conditions: tagged,
+      }),
+      // The first spot launch in an account creates AWSServiceRoleForEC2Spot on the caller's
+      // behalf; without this it fails with AuthFailure.ServiceLinkedRoleCreationNotPermitted.
+      new iam.PolicyStatement({
+        sid: "SpotServiceLinkedRole",
+        actions: ["iam:CreateServiceLinkedRole"],
+        resources: [`arn:${partition}:iam::*:role/aws-service-role/spot.amazonaws.com/AWSServiceRoleForEC2Spot`],
+        conditions: { StringEquals: { "iam:AWSServiceName": "spot.amazonaws.com" } },
       }),
       new iam.PolicyStatement({
         sid: "PassInstanceRole",
