@@ -24,9 +24,18 @@ export function getSecret(name: SecretName): string | undefined {
   }
 }
 
+/** Quote one argument for `security -i`'s command line, which follows shell-like double-quote rules. */
+function securityQuote(s: string) {
+  if (/[\r\n]/.test(s)) throw new Error("Secret can't contain line breaks");
+  return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
 export function setSecret(name: SecretName, value: string) {
-  execFileSync("security", ["add-generic-password", "-U", "-s", SERVICE, "-a", name, "-w", value], {
-    stdio: "ignore",
+  // The command goes in on stdin (`security -i`) so the secret never appears in argv, where
+  // any local process could read it from the process list.
+  execFileSync("security", ["-i"], {
+    input: `add-generic-password -U -s ${securityQuote(SERVICE)} -a ${securityQuote(name)} -w ${securityQuote(value)}\n`,
+    stdio: ["pipe", "ignore", "ignore"],
   });
 }
 
