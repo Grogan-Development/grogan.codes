@@ -3,11 +3,22 @@ import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { getSecret } from "../secrets";
 
 /**
- * Where the app finds AWS: a named profile and a region, from Settings (Keychain) or the
- * environment. Credentials resolve through the standard chain, so `aws sso login` works.
+ * Where the app finds AWS: a named profile and the regions workspaces may run in, from Settings
+ * (Keychain) or the environment. Credentials resolve through the standard chain, so `aws login`
+ * and `aws sso login` work. Region is a price decision, not a location one: the defaults are
+ * AWS's base-price US regions, which all offer every type in machines.ts.
  */
+export const DEFAULT_REGIONS = ["us-east-1", "us-east-2", "us-west-2"];
+
+export function awsRegions(): string[] {
+  const raw = getSecret("aws-regions") || process.env.CODESPACE_AWS_REGIONS || "";
+  const list = raw.split(",").map((r) => r.trim()).filter(Boolean);
+  return list.length ? [...new Set(list)] : DEFAULT_REGIONS;
+}
+
+/** The home region: images are built here and copied to the others. Default for region-less calls. */
 export function awsRegion(): string {
-  return getSecret("aws-region") || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1";
+  return awsRegions()[0];
 }
 
 export function awsProfile(): string | undefined {

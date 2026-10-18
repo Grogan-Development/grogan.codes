@@ -101,3 +101,30 @@ Preview, terminal and desktop routes keep their response shapes (`{ url }`). Onl
 | ui | `src/components/**`, `src/lib/api.ts`, `src/app/api/settings/route.ts`, `src/app/api/machines/route.ts`, `src/app/desktop/**`, `README.md`, `GLOSSARY.md` |
 
 Nobody commits. The integrator deletes `src/server/modal.ts`, removes the `modal` dependency, and runs typecheck, lint and build across the whole tree. Until then, errors in files you don't own are expected. Make your own files correct against the contract.
+
+## Multi-region (added after the first cut)
+
+Region is a price decision. Workspaces may run in any region in `awsRegions()` (`src/server/aws/config.ts`): the Keychain `aws-regions` comma list, else `CODESPACE_AWS_REGIONS`, else `DEFAULT_REGIONS` = us-east-1, us-east-2, us-west-2. These are AWS's base-price US regions; all three offer every type in `machines.ts` at the same on-demand price, so `onDemandHr` holds in each of them. The first region is the **home region** (`awsRegion()`).
+
+### Infra
+- `CodespaceStack` is deployed once per region: VPC, security group, instance profile, launch templates, SSM params and the AMI-param seeding.
+- **Image Builder pipelines run only in the home region** (context `images=true`). Each pipeline's distribution covers every region in context `regions` (comma list) and writes `PARAMS.amiId(variant)` in each one.
+- **IAM is global,** so the `CodespaceApp` policy (and the optional user) is created only by the home-region stack (`iam=true`). The other regions deploy with `iam=false`.
+
+### App
+- **`createWorkspace({ ..., region })`:** `region` is `"auto"` or one of `awsRegions()`.
+  - **Resolving `"auto"`:** consider regions whose infra is ready, whose AMI for the machine's variant is built, and which offer the type in at least one AZ.
+    - **Spot:** pick the lowest current spot price, breaking ties with the spot placement score.
+    - **On-demand:** prices are equal, so pick the best placement score for the type, falling back to the first region in `awsRegions()` order.
+  - The chosen region is stored in `workspaces.region`. Everything after creation already uses the row's region.
+- **`ec2.ts`:**
+  - `infraStatus(region)` checks one region; add `regionsStatus(): Promise<Array<{ region, ok, missing }>>` for all of them.
+  - `spotPrices(types, region)` already takes a region.
+  - Add `offeredRegions(types): Promise<Record<type, string[]>>`: regions where the type is offered, from DescribeInstanceTypeOfferings by region, cached 1 hour.
+- **`GET /api/machines`** returns `{ machines, defaultType, diskSteps, defaultDiskGb, regions: Array<{ region, ok, missing }>, offered: Record<type, string[]>, spot: Record<region, Record<type, number>> }`. Spot and offered are best-effort, each under a short timeout.
+- **`POST /api/workspaces`** body adds `region: "auto" | <region>` (default `"auto"`).
+- **`GET /api/settings`** returns `aws: AwsStatus & { regions: Array<{ region, ok, missing }> }` instead of a single `infra`. `POST` takes `awsRegions?: string` (comma list, each validated, first is home) instead of `awsRegion`, stores the `aws-regions` secret and calls `resetAws()`.
+- **Picker UI:** a Region control.
+  - **"Cheapest" (default):** shows which region it would pick and the price there.
+  - **Named regions:** one entry per region, with that region's spot price for the selected type. Regions that aren't ready or don't offer the type are disabled, with the reason.
+  - The workspace card shows its region (already does).
