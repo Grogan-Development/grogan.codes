@@ -24,6 +24,7 @@ import {
   type Tag,
 } from "@aws-sdk/client-ec2";
 import { SSMClient, GetParametersByPathCommand } from "@aws-sdk/client-ssm";
+import { ServiceQuotasClient, GetServiceQuotaCommand } from "@aws-sdk/client-service-quotas";
 import { awsGeneration, awsRegion, awsRegions, clientConfig, IMAGE_VARIANTS, PARAM_PREFIX, PARAMS, TAG_APP, TAG_WORKSPACE, type ImageVariant } from "./config";
 import { sshPublicKey } from "./keys";
 import type { Machine, Market } from "./machines";
@@ -36,6 +37,9 @@ const g = globalThis as unknown as {
   __csInfra?: Map<string, { at: number; params: Promise<Record<string, string>> }>;
   __csSpot?: Map<string, { at: number; prices: Promise<Record<string, number>> }>;
   __csOffered?: Map<string, { at: number; types: Promise<Set<string>> }>;
+  __csSq?: Map<string, ServiceQuotasClient>;
+  __csQuotas?: Map<string, { at: number; q: Promise<Quotas | null> }>;
+  __csUsage?: Map<string, { at: number; u: Promise<Quotas> }>;
 };
 
 function cached<T>(map: Map<string, T>, region: string, make: () => T): T {
@@ -157,12 +161,13 @@ export function explainAwsError(err: unknown, ctx: { type?: string; market?: Mar
   const msg = err instanceof Error ? err.message : String(err);
   const where = ctx.region ? ` in ${ctx.region}` : "";
   switch (code(err)) {
-    case "VcpuLimitExceeded":
+    case "VcpuLimitExceeded": {
+      const fam = ctx.type ? familyOf(ctx.type) : null;
+      const quota = fam ? `"${quotaLabel(fam, ctx.market ?? "on-demand")}" vCPU quota` : "vCPU quota for this instance family";
       return new Error(
-        `AWS vCPU quota reached for ${ctx.type ?? "this instance type"}${where}. Raise the ${
-          ctx.market === "spot" ? "Spot" : "On-Demand"
-        } quota for its family (Standard, G and VT, or P) in Service Quotas. (${msg})`,
+        `No quota for ${ctx.type ?? "this instance type"} ${ctx.market ?? ""}${where}: the ${quota} is used up. Raise it in Service Quotas, or stop other instances. (${msg})`,
       );
+    }
     case "MaxSpotInstanceCountExceeded":
       return new Error(`AWS Spot request limit reached${where}. Raise the Spot quota in Service Quotas, or use on-demand. (${msg})`);
     case "InsufficientInstanceCapacity":
@@ -423,7 +428,7 @@ export function spotInterrupted(info: InstanceInfo): boolean {
   return /^Server\.Spot/.test(info.stateReason ?? "");
 }
 
-export async function startInstance(id: string, region = awsRegion()) {
+export async function startInstance(id: string, region = awsRegion(), ctx: { type?: string; market?: Market } = {}) {
   // A persistent spot request trails its instance: right after a stop or hibernate it is still
   // "marked-for-stop", and StartInstances refuses until it settles to "disabled" (a minute or two).
   const deadline = Date.now() + 180_000;
@@ -436,7 +441,7 @@ export async function startInstance(id: string, region = awsRegion()) {
         await new Promise((r) => setTimeout(r, 5_000));
         continue;
       }
-      throw explainAwsError(err, { region });
+      throw explainAwsError(err, { ...ctx, region });
     }
   }
 }
@@ -643,13 +648,17 @@ export async function resolveRegion(m: Machine, market: Market): Promise<string>
   const regions = awsRegions();
   const [ready, offered] = await Promise.all([Promise.all(regions.map(readiness)), offeredRegions([m.type])]);
   const why: string[] = [];
-  const candidates = regions.filter((r, i) => {
+  let candidates = regions.filter((r, i) => {
     if (!ready[i].variants.has(m.variant)) why.push(`${r}: infra or ${m.variant} image not ready`);
     else if (!offered[m.type].includes(r)) why.push(`${r}: ${m.type} not offered`);
     else return true;
     return false;
   });
   if (!candidates.length) throw new Error(`No region can run ${m.type} right now (${why.join("; ")}). Check Settings.`);
+  const checks = await Promise.all(candidates.map((r) => quotaCheck(m, market, r)));
+  const fitting = candidates.filter((_, i) => checks[i].fits);
+  if (!fitting.length) throw new Error(`No region has quota for ${quotaShortfall(m, market, checks.map((c, i) => ({ region: candidates[i], ...c })))}`);
+  candidates = fitting;
   if (candidates.length === 1) return candidates[0];
   const [scores, prices] = await Promise.all([
     regionScores(m.type, candidates),
@@ -657,4 +666,123 @@ export async function resolveRegion(m: Machine, market: Market): Promise<string>
   ]);
   const price = (r: string) => (market === "spot" ? (prices[candidates.indexOf(r)] ?? Infinity) : 0);
   return [...candidates].sort((a, b) => price(a) - price(b) || (scores[b] ?? 0) - (scores[a] ?? 0) || regions.indexOf(a) - regions.indexOf(b))[0];
+}
+
+// ---- vCPU quotas ------------------------------------------------------------
+
+export type Family = "standard" | "g" | "p";
+type ByMarket = { onDemand: number; spot: number };
+export type Quotas = Record<Family, ByMarket>;
+
+/** Service Quotas codes for running vCPUs (EC2), per family and market. */
+const QUOTA_CODES: Record<Family, Record<keyof ByMarket, string>> = {
+  standard: { onDemand: "L-1216C47A", spot: "L-34B43A08" },
+  g: { onDemand: "L-DB2E81BA", spot: "L-3819A6DF" },
+  p: { onDemand: "L-417A185B", spot: "L-7212CCBC" },
+};
+
+const FAMILY_LABEL: Record<Family, string> = { standard: "Standard", g: "G and VT", p: "P" };
+
+/** The quota family an instance type counts against; null for families with quotas of their own (x, inf, trn...). */
+export function familyOf(type: string): Family | null {
+  if (/^(g|vt)\d/.test(type) || /^gr\d/.test(type)) return "g";
+  if (/^p\d/.test(type)) return "p";
+  if (/^[acdhimrtz]\d/.test(type)) return "standard";
+  return null;
+}
+
+function quotaLabel(f: Family, market: Market) {
+  return `${FAMILY_LABEL[f]} ${market}`;
+}
+
+const mk = (market: Market): keyof ByMarket => (market === "spot" ? "spot" : "onDemand");
+
+function sq(region: string): ServiceQuotasClient {
+  return cached((g.__csSq ??= new Map()), region, () => new ServiceQuotasClient(clientConfig(region)));
+}
+
+const QUOTA_TTL_MS = 10 * 60_000;
+const USAGE_TTL_MS = 30_000;
+
+/** The region's vCPU limits, cached 10 minutes. null when they can't be read (unknown: never blocks a launch). */
+export async function quotas(region = awsRegion()): Promise<Quotas | null> {
+  const map = (g.__csQuotas ??= new Map());
+  const key = `${awsGeneration()}:${region}`;
+  const hit = map.get(key);
+  if (hit && Date.now() - hit.at < QUOTA_TTL_MS) return hit.q;
+  const q = (async (): Promise<Quotas | null> => {
+    try {
+      const get = async (QuotaCode: string) => (await sq(region).send(new GetServiceQuotaCommand({ ServiceCode: "ec2", QuotaCode }))).Quota?.Value ?? 0;
+      const fams = Object.keys(QUOTA_CODES) as Family[];
+      const vals = await Promise.all(fams.map(async (f) => ({ onDemand: await get(QUOTA_CODES[f].onDemand), spot: await get(QUOTA_CODES[f].spot) })));
+      return Object.fromEntries(fams.map((f, i) => [f, vals[i]])) as Quotas;
+    } catch (err) {
+      console.warn(`[quotas ${region}]`, err instanceof Error ? err.message : err);
+      map.delete(key); // retry next time rather than caching the failure
+      return null;
+    }
+  })();
+  map.set(key, { at: Date.now(), q });
+  return q;
+}
+
+/** vCPUs of every running or pending instance in the region (the whole account, not just ours), per family and market. */
+export async function vcpuUsage(region = awsRegion()): Promise<Quotas> {
+  const map = (g.__csUsage ??= new Map());
+  const key = `${awsGeneration()}:${region}`;
+  const hit = map.get(key);
+  if (hit && Date.now() - hit.at < USAGE_TTL_MS) return hit.u;
+  const u = (async () => {
+    const out: Quotas = { standard: { onDemand: 0, spot: 0 }, g: { onDemand: 0, spot: 0 }, p: { onDemand: 0, spot: 0 } };
+    let NextToken: string | undefined;
+    do {
+      const res = await ec2(region).send(
+        new DescribeInstancesCommand({ Filters: [{ Name: "instance-state-name", Values: ["pending", "running"] }], NextToken }),
+      );
+      for (const r of res.Reservations ?? [])
+        for (const i of r.Instances ?? []) {
+          const f = i.InstanceType ? familyOf(i.InstanceType) : null;
+          if (!f) continue;
+          const vcpu = (i.CpuOptions?.CoreCount ?? 0) * (i.CpuOptions?.ThreadsPerCore ?? 1);
+          out[f][i.InstanceLifecycle === "spot" ? "spot" : "onDemand"] += vcpu;
+        }
+      NextToken = res.NextToken || undefined;
+    } while (NextToken);
+    return out;
+  })();
+  map.set(key, { at: Date.now(), u });
+  u.catch(() => map.delete(key));
+  return u;
+}
+
+export type QuotaCheck = { fits: boolean; family: Family | null; limit: number | null; used: number | null };
+
+/** Whether one more `m` fits under the region's quota. Unknown quota or usage counts as fitting. */
+export async function quotaCheck(m: Machine, market: Market, region: string): Promise<QuotaCheck> {
+  const family = familyOf(m.type);
+  if (!family) return { fits: true, family, limit: null, used: null };
+  const [q, u] = await Promise.all([quotas(region), vcpuUsage(region).catch(() => null)]);
+  if (!q || !u) return { fits: true, family, limit: q?.[family][mk(market)] ?? null, used: null };
+  const limit = q[family][mk(market)];
+  const used = u[family][mk(market)];
+  return { fits: used + m.vcpu <= limit, family, limit, used };
+}
+
+/** "g6.xlarge on-demand: G and VT on-demand is 0 vCPU in us-east-1, us-east-2 (...)", grouping regions that read the same. */
+function quotaShortfall(m: Machine, market: Market, checks: Array<QuotaCheck & { region: string }>): string {
+  const groups = new Map<string, string[]>();
+  for (const c of checks.filter((c) => !c.fits)) {
+    const text = `is ${c.limit} vCPU${c.used ? ` with ${c.used} in use` : ""}`;
+    groups.set(text, [...(groups.get(text) ?? []), c.region]);
+  }
+  const fam = checks[0]?.family;
+  const label = fam ? quotaLabel(fam, market) : "the vCPU quota";
+  const parts = [...groups].map(([text, regions]) => `${text} in ${regions.join(", ")}`);
+  return `${m.type} ${market} (${m.vcpu} vCPU): ${label} ${parts.join("; ")}. Request an increase in Service Quotas.`;
+}
+
+/** Refuses up front when `m` can't fit the region's quota (an explicit region choice). */
+export async function assertQuota(m: Machine, market: Market, region: string) {
+  const c = await quotaCheck(m, market, region);
+  if (!c.fits) throw new Error(`No quota in ${region} for ${quotaShortfall(m, market, [{ ...c, region }])}`);
 }

@@ -15,6 +15,7 @@ import {
   spotInterrupted,
   rootVolumeGb,
   resolveRegion,
+  assertQuota,
   maybeHibernated,
   createRootSnapshot,
   snapshotState,
@@ -165,6 +166,7 @@ export async function createWorkspace(input: {
   }
   if (db().prepare("SELECT 1 FROM workspaces WHERE name = ?").get(input.name)) throw new Error(`A workspace named "${input.name}" already exists`);
   const region = input.region === "auto" ? await resolveRegion(m, input.market) : input.region;
+  if (input.region !== "auto") await assertQuota(m, input.market, region);
   const id = nanoid(10);
   const t = now();
   db()
@@ -222,7 +224,7 @@ async function bootInstance(w: Workspace): Promise<string> {
   }
   if (existing && existing.state !== "terminated" && existing.state !== "shutting-down") {
     if (existing.state === "stopping") await waitForState(w.instance_id!, "stopped", { region });
-    if (existing.state === "stopping" || existing.state === "stopped") await startInstance(w.instance_id!, region);
+    if (existing.state === "stopping" || existing.state === "stopped") await startInstance(w.instance_id!, region, { type: w.instance_type ?? undefined, market: w.market ?? undefined });
     return w.instance_id!;
   }
   const m = machine(w.instance_type!);
@@ -368,7 +370,7 @@ async function start(id: string): Promise<Remote> {
         let info = await describeInstance(instanceId, region);
         if (!info || info.state === "terminated" || info.state === "shutting-down") throw new Error(TERMINATED);
         if (info.state === "stopping") info = await waitForState(instanceId, "stopped", { region });
-        if (info.state === "stopped") await startInstance(instanceId, region);
+        if (info.state === "stopped") await startInstance(instanceId, region, { type: w.instance_type ?? undefined, market: w.market ?? undefined });
       }
       await waitForState(instanceId, "running", { region });
       const r = await waitForRemote(instanceId);

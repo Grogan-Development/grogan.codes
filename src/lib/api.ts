@@ -120,6 +120,8 @@ export type MachinesInfo = {
   offered: Record<string, string[]>;
   /** Current lowest spot price, by region then type. */
   spot: Record<string, Record<string, number>>;
+  /** vCPU quotas by region; null (or absent) when unknown. */
+  quotas?: Record<string, RegionQuota | null>;
 };
 
 /** Mirrors `PARAMS.amiId` in src/server/aws/config.ts, which can't be imported client-side. */
@@ -165,3 +167,34 @@ export function regionSummary(r: RegionStatus): RegionSummary {
     usable: all.some((v) => !missing.has(v)),
   };
 }
+
+type MarketVcpu = { onDemand: number; spot: number };
+export type QuotaFamily = "standard" | "g" | "p";
+/** vCPU limits and current use per family and market, for one region. */
+export type RegionQuota = Record<QuotaFamily, MarketVcpu> & { usage: Record<QuotaFamily, MarketVcpu> };
+
+const FAMILY_LABEL: Record<QuotaFamily, string> = { standard: "Standard", g: "G", p: "P" };
+
+/** The EC2 vCPU quota family: G and VT for g*, P for p*, Standard for the rest. */
+export function quotaFamily(m: Machine): QuotaFamily {
+  return m.type.startsWith("g") ? "g" : m.type.startsWith("p") ? "p" : "standard";
+}
+
+/** Why this type doesn't fit the region's vCPU quota for the market, or null (also when unknown). */
+export function quotaBlocker(q: RegionQuota | null | undefined, m: Machine, market: Market): string | null {
+  if (!q) return null;
+  const fam = quotaFamily(m);
+  const key = market === "spot" ? "spot" : "onDemand";
+  const limit = q[fam]?.[key];
+  const used = q.usage?.[fam]?.[key] ?? 0;
+  if (limit == null || used + m.vcpu <= limit) return null;
+  const label = `${FAMILY_LABEL[fam]} ${market}`;
+  if (limit === 0) return `Quota: ${label} 0 vCPU`;
+  return `Quota: ${label} ${limit} vCPU, ${used} in use`;
+}
+
+export const QUOTA_FAMILIES: { key: QuotaFamily; label: string }[] = [
+  { key: "standard", label: "Standard" },
+  { key: "g", label: "G and VT" },
+  { key: "p", label: "P" },
+];

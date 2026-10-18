@@ -1,13 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useState, type ReactNode } from "react";
 import type { AwsStatus } from "@/server/aws/config";
-import { api, diskUse, regionSummary, RESTORE_HINT, dollars, gpuShare, machineLabel, timeAgo, type MachinesInfo, type Market, type RegionStatus, type Thread, type Workspace } from "@/lib/api";
-import { bestSpot, estimate, InstancePicker, RegionPicker, regionBlocker, resolveCheapest } from "./InstancePicker";
+import { api, diskUse, QUOTA_FAMILIES, regionSummary, RESTORE_HINT, dollars, gpuShare, machineLabel, timeAgo, type MachinesInfo, type Market, type RegionStatus, type Thread, type Workspace } from "@/lib/api";
+import { bestSpot, estimate, InstancePicker, overQuota, RegionPicker, regionBlocker, resolveCheapest } from "./InstancePicker";
 import { ThreadSquares } from "./ThreadSquares";
 import type { PermissionEvent } from "./composer/model";
-import { Button, ColdTag, Icon, Input, Logo, MarketTag, Modal, Segmented, StateDot } from "./ui";
+import { Button, ColdTag, FOCUS, Icon, Input, Logo, MarketTag, Modal, Segmented, StateDot } from "./ui";
 import { DeleteWorkspace } from "./DeleteFlow";
 import { InstructionsEditor } from "./InstructionsEditor";
 import { RepoChips, repoSpec, type RepoChoice } from "./RepoPicker";
@@ -315,7 +315,7 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
   // The region the workspace would land in, as far as the client can tell.
   const landing = selected && info ? (region === "auto" ? resolveCheapest(info, selected, market) : region) : null;
   const named = info?.regions.find((r) => r.region === region);
-  const blocker = selected && info && named ? regionBlocker(named, selected, info.offered) : null;
+  const blocker = selected && info && named ? regionBlocker(named, selected, info, market) : null;
   const cost = selected && info ? estimate(selected, market, diskGb, landing ? info.spot[landing]?.[selected.type] : undefined) : null;
   const best = selected && info ? bestSpot(info, selected) : null;
   // Why Create is disabled, shown next to the button (a disabled button can't show a tooltip).
@@ -328,7 +328,9 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
       : blocker
         ? `${region} can't run ${selected.type}`
         : !landing
-          ? `No region can run ${selected.type} yet`
+          ? overQuota(info, selected, market)
+            ? `${selected.type} is over your ${market} vCPU quota in every region (Settings → Quotas)`
+            : `No region can run ${selected.type} yet`
           : !name.trim()
             ? "Name the workspace"
             : "";
@@ -591,6 +593,8 @@ function SettingsModal({ settings, onClose, onSaved }: { settings: Settings; onC
           </StatusRow>
         </div>
 
+        <QuotasSection />
+
         <div className="flex flex-col gap-1.5">
           <label className="flex flex-wrap items-center gap-2 text-[13px]">
             Move stopped workspaces to cold storage after
@@ -656,5 +660,65 @@ function SettingsModal({ settings, onClose, onSaved }: { settings: Settings; onC
         </div>
       </div>
     </Modal>
+  );
+}
+
+const QUOTAS_URL = "https://console.aws.amazon.com/servicequotas/home/services/ec2/quotas";
+
+/** Each region's vCPU limits (in use / limit) per family and market, from /api/machines. */
+function QuotasSection() {
+  const [quotas, setQuotas] = useState<NonNullable<MachinesInfo["quotas"]> | "error" | null>(null);
+  useEffect(() => {
+    api<MachinesInfo>("/api/machines")
+      .then((i) => setQuotas(i.quotas ?? {}))
+      .catch(() => setQuotas("error"));
+  }, []);
+  const cell = (used: number | undefined, limit: number | undefined) =>
+    limit == null ? "?" : (
+      <span className={limit === 0 ? "text-faint" : used && used >= limit ? "text-warn" : "text-text-2"} title={`${used ?? 0} of ${limit} vCPU in use`}>
+        {used ? `${used}/` : ""}
+        {limit}
+      </span>
+    );
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-baseline gap-2">
+        <span className="text-[13px] font-semibold">Quotas</span>
+        <span className="text-xs text-faint">vCPU, on-demand / spot</span>
+        <a href={QUOTAS_URL} target="_blank" rel="noreferrer" className={`ml-auto rounded text-xs text-accent hover:underline ${FOCUS}`}>
+          Service Quotas ↗
+        </a>
+      </div>
+      {quotas === null ? (
+        <p className="text-xs text-muted">Loading…</p>
+      ) : quotas === "error" || !Object.keys(quotas).length ? (
+        <p className="text-xs text-muted">Couldn’t read quotas. GPU types need the G and VT (or P) limit raised above 0.</p>
+      ) : (
+        <div className="grid grid-cols-[minmax(0,1fr)_repeat(3,auto)] gap-x-4 gap-y-1 rounded-[10px] border border-line bg-panel-2 px-3 py-2 font-mono text-xs">
+          <span />
+          {QUOTA_FAMILIES.map((f) => (
+            <span key={f.key} className="text-right font-sans text-[11px] text-muted">
+              {f.label}
+            </span>
+          ))}
+          {Object.entries(quotas).map(([region, q]) => (
+            <Fragment key={region}>
+              <span className="text-muted">{region}</span>
+              {QUOTA_FAMILIES.map((f) => (
+                <span key={f.key} className="text-right">
+                  {q ? (
+                    <>
+                      {cell(q.usage?.[f.key]?.onDemand, q[f.key]?.onDemand)} <span className="text-faint">/</span> {cell(q.usage?.[f.key]?.spot, q[f.key]?.spot)}
+                    </>
+                  ) : (
+                    <span className="text-faint">unknown</span>
+                  )}
+                </span>
+              ))}
+            </Fragment>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

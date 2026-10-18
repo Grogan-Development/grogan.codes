@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { AMI_PARAM, dollars, missingParams, gpuShare, type Machine, type MachinesInfo, type Market, type RegionStatus } from "@/lib/api";
+import { AMI_PARAM, dollars, missingParams, quotaBlocker, gpuShare, type Machine, type MachinesInfo, type Market, type RegionStatus } from "@/lib/api";
 import { FOCUS, Segmented } from "./ui";
 
 /** gp3 storage, us-east-1, per GB-month. The disk is billed while it exists, running or not. */
@@ -11,8 +11,12 @@ const HOURS_PER_MONTH = 730;
 /** AWS's base-price US regions: `onDemandHr` in machines.ts holds in each of them. */
 export const BASE_PRICE_REGIONS = ["us-east-1", "us-east-2", "us-west-2"];
 
-/** Why this region can't run this type, or null when it can. Unknown offerings count as offered. */
-export function regionBlocker(r: RegionStatus, m: Machine, offered: MachinesInfo["offered"]): string | null {
+/**
+ * Why this region can't run this type, or null when it can. Unknown offerings and quotas count as
+ * fine. With a market, the region's vCPU quota for that market is checked too.
+ */
+export function regionBlocker(r: RegionStatus, m: Machine, info: Pick<MachinesInfo, "offered" | "quotas">, market?: Market): string | null {
+  const offered = info.offered;
   const params = missingParams(r);
   // A failed or timed-out status check leaves no parameter names to go on.
   if (!r.ok && params.length < r.missing.length) return "status unknown";
@@ -21,15 +25,21 @@ export function regionBlocker(r: RegionStatus, m: Machine, offered: MachinesInfo
   if (!r.ok && !params.length) return "status unknown";
   const where = offered[m.type];
   if (where && !where.includes(r.region)) return "type not offered";
-  return null;
+  return market ? quotaBlocker(info.quotas?.[r.region], m, market) : null;
 }
 
-/** The lowest spot price for a type across regions that can run it. */
-export function bestSpot(info: MachinesInfo, m: Machine): { region: string; price: number } | null {
+/** Ready for the type somewhere, but over the vCPU quota for the market in every such region. */
+export function overQuota(info: MachinesInfo, m: Machine, market: Market): boolean {
+  const ready = info.regions.filter((r) => !regionBlocker(r, m, info));
+  return ready.length > 0 && ready.every((r) => regionBlocker(r, m, info, market));
+}
+
+/** The lowest spot price for a type across regions that can run it (within spot quota, unless ignored). */
+export function bestSpot(info: MachinesInfo, m: Machine, ignoreQuota = false): { region: string; price: number } | null {
   let best: { region: string; price: number } | null = null;
   for (const r of info.regions) {
     const price = info.spot[r.region]?.[m.type];
-    if (price && !regionBlocker(r, m, info.offered) && (!best || price < best.price)) best = { region: r.region, price };
+    if (price && !regionBlocker(r, m, info, ignoreQuota ? undefined : "spot") && (!best || price < best.price)) best = { region: r.region, price };
   }
   return best;
 }
@@ -44,7 +54,7 @@ export function resolveCheapest(info: MachinesInfo, m: Machine, market: Market):
     const best = bestSpot(info, m);
     if (best) return best.region;
   }
-  return info.regions.find((r) => !regionBlocker(r, m, info.offered))?.region ?? null;
+  return info.regions.find((r) => !regionBlocker(r, m, info, market))?.region ?? null;
 }
 
 /** What the instance costs per hour, and what the root volume costs. */
@@ -77,7 +87,7 @@ function matches(m: Machine, f: Filters) {
 
 /** The hourly price that sorts the results: best spot price across ready regions, or on-demand. */
 function priceFor(info: MachinesInfo, m: Machine, market: Market) {
-  return market === "spot" ? (bestSpot(info, m)?.price ?? m.onDemandHr) : m.onDemandHr;
+  return market === "spot" ? ((bestSpot(info, m) ?? bestSpot(info, m, true))?.price ?? m.onDemandHr) : m.onDemandHr;
 }
 
 /** Filters derived from a type, so the default selection shows up already matching. */
@@ -217,7 +227,8 @@ export function InstancePicker({ info, value, market, onChange }: { info: Machin
                 m={m}
                 on={m.type === value}
                 market={market}
-                spot={bestSpot(info, m)}
+                spot={bestSpot(info, m) ?? bestSpot(info, m, true)}
+                over={overQuota(info, m, market)}
                 onPick={() => {
                   setManual(true);
                   onChange(m.type);
@@ -233,7 +244,21 @@ export function InstancePicker({ info, value, market, onChange }: { info: Machin
   );
 }
 
-function Row({ m, on, market, spot, onPick }: { m: Machine; on: boolean; market: Market; spot: { region: string; price: number } | null; onPick: () => void }) {
+function Row({
+  m,
+  on,
+  market,
+  spot,
+  over,
+  onPick,
+}: {
+  m: Machine;
+  on: boolean;
+  market: Market;
+  spot: { region: string; price: number } | null;
+  over: boolean;
+  onPick: () => void;
+}) {
   const off = spot ? Math.round((1 - spot.price / m.onDemandHr) * 100) : null;
   return (
     <button
@@ -252,6 +277,11 @@ function Row({ m, on, market, spot, onPick }: { m: Machine; on: boolean; market:
           {m.note && (
             <span title={m.note} className="rounded border border-line-2 px-1 text-[10px] text-muted">
               burstable
+            </span>
+          )}
+          {over && (
+            <span title={`Over your ${market} vCPU quota in every ready region. Raise it in Service Quotas.`} className="rounded border border-line-2 px-1 text-[10px] text-faint">
+              over quota
             </span>
           )}
         </span>
@@ -336,11 +366,11 @@ export function RegionPicker({ info, m, market, value, onChange }: { info: Machi
           value === "auto",
           !cheapest,
           <>Cheapest{cheapest && <span className="text-muted"> → {cheapest}</span>}</>,
-          cheapest ? price(cheapest) : "no region can run this type",
+          cheapest ? price(cheapest) : overQuota(info, m, market) ? "over quota in every region" : "no region can run this type",
           "Picks the region when the workspace is created",
         )}
         {info.regions.map((r) => {
-          const blocker = regionBlocker(r, m, info.offered);
+          const blocker = regionBlocker(r, m, info, market);
           return option(r.region, value === r.region, !!blocker, r.region, blocker ?? price(r.region), r.error);
         })}
       </div>

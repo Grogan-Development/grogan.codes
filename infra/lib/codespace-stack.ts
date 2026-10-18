@@ -449,6 +449,8 @@ export function appPolicyDocument(partition: string, account: string): iam.Polic
   return new iam.PolicyDocument({
     statements: [
       new iam.PolicyStatement({ sid: "Identity", actions: ["sts:GetCallerIdentity"], resources: ["*"] }),
+      // vCPU quotas per family and market, so the picker can skip regions a launch would fail in.
+      new iam.PolicyStatement({ sid: "ReadEc2Quotas", actions: ["servicequotas:GetServiceQuota"], resources: [`arn:${partition}:servicequotas:*:*:ec2/*`] }),
       new iam.PolicyStatement({
         sid: "Ec2Read",
         actions: ["ec2:Describe*", "ec2:GetSpotPlacementScores", "ec2:DescribeSpotPriceHistory"],

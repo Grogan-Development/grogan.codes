@@ -8,10 +8,6 @@
 #
 # Idempotent: every step checks or overwrites its own state, so re-running is safe.
 #
-# Under Image Builder the script runs twice. The first pass installs everything and switches the
-# SSM agent from the snap to AWS's .deb, but can't remove the snap agent that is running it. It
-# exits 194, AWSTOE reboots the instance and re-runs the step, now under the .deb agent, and the
-# second pass purges snapd and records a boot profile.
 # Contract: docs/aws-cutover.md, "Image contents". Paths must match src/server/workspaces.ts.
 set -euo pipefail
 set -x
@@ -53,23 +49,6 @@ if command -v cloud-init >/dev/null 2>&1; then cloud-init status --wait >/dev/nu
 
 apt_get() { apt-get -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"; }
 
-# True when an ancestor process matches: by executable path prefix ("exe:/snap/...") or name.
-ancestor() {
-  local want="$1" pid="$PPID" exe comm
-  while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
-    exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
-    comm="$(cat "/proc/$pid/comm" 2>/dev/null || true)"
-    case "$want" in
-      exe:*) [[ "$exe" == "${want#exe:}"* ]] && return 0 ;;
-      *) [ "$comm" = "$want" ] && return 0 ;;
-    esac
-    pid="$(awk '/^PPid:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)"
-  done
-  return 1
-}
-under_snap_agent() { ancestor exe:/snap/amazon-ssm-agent/; }
-under_toe() { ancestor awstoe; }
-NEED_REBOOT=0
 
 # ---- Keep snap browsers out ------------------------------------------------------------------
 # On 22.04 the chromium-browser and firefox debs are shims that install snaps. Snaps don't run
@@ -280,44 +259,10 @@ systemctl enable cloud-init-local.service cloud-init.service cloud-config.servic
 CI_VERSION="$(cloud-init --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)"
 [ "$(printf '%s\n22.1\n' "$CI_VERSION" | sort -V | head -n1)" = "22.1" ] || die "cloud-init $CI_VERSION is older than 22.1"
 
-# ---- amazon-ssm-agent: the .deb, not the snap -------------------------------------------------
-# The snap agent waits on snapd (seeding, squashfs mounts, apparmor) at every boot, which is most
-# of the delay before SSM answers. AWS's .deb runs as a plain systemd service.
-log "amazon-ssm-agent (.deb)"
-if ! dpkg-query -W -f='${Status}' amazon-ssm-agent 2>/dev/null | grep -q "install ok installed"; then
-  deb_arch="$(dpkg --print-architecture)"
-  token="$(curl -fsS -m 2 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null || true)"
-  region="$(curl -fsS -m 2 -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || true)"
-  tmp="$(mktemp -d)"
-  if [ -z "$region" ] || ! curl -fsSL -o "$tmp/amazon-ssm-agent.deb" \
-      "https://s3.${region}.amazonaws.com/amazon-ssm-${region}/latest/debian_${deb_arch}/amazon-ssm-agent.deb"; then
-    curl -fsSL -o "$tmp/amazon-ssm-agent.deb" \
-      "https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_${deb_arch}/amazon-ssm-agent.deb"
-  fi
-  # Don't let the package start a second agent next to the one that may be running this script.
-  printf '#!/bin/sh\nexit 101\n' >/usr/sbin/policy-rc.d
-  chmod 0755 /usr/sbin/policy-rc.d
-  dpkg -i "$tmp/amazon-ssm-agent.deb" || { rm -f /usr/sbin/policy-rc.d; die "dpkg -i amazon-ssm-agent.deb failed"; }
-  rm -f /usr/sbin/policy-rc.d
-  rm -rf "$tmp"
-fi
-systemctl enable amazon-ssm-agent.service
-SNAP_AGENT_UNIT=snap.amazon-ssm-agent.amazon-ssm-agent.service
-if under_snap_agent; then
-  # The snap agent is running us (Image Builder, or a Session Manager shell). Keep it alive for
-  # now, make sure the .deb agent isn't running beside it, and stop the snap one from coming back.
-  systemctl stop amazon-ssm-agent.service 2>/dev/null || true
-  systemctl disable "$SNAP_AGENT_UNIT" 2>/dev/null || true
-  systemctl mask "$SNAP_AGENT_UNIT"
-  NEED_REBOOT=1
-else
-  if systemctl cat "$SNAP_AGENT_UNIT" >/dev/null 2>&1; then
-    systemctl disable --now "$SNAP_AGENT_UNIT" 2>/dev/null || true
-    systemctl mask "$SNAP_AGENT_UNIT"
-  fi
-  systemctl start amazon-ssm-agent.service
-fi
-
+# ---- amazon-ssm-agent ---------------------------------------------------------------------------
+# The snap agent stays. Swapping to AWS's .deb mid-build doesn't work: the .deb's preinst refuses
+# while the snap agent (the one running this build) is installed. Boot time is measured instead
+# (/var/log/codespace-boot-profile.txt) and trimmed below.
 # ---- Hibernation (CPU variants) ---------------------------------------------------------------
 if [ "$GPU" = 0 ]; then
   log "Hibernation: hibinit agent, KASLR off"
@@ -438,35 +383,6 @@ done
 if [ "${#purge[@]}" -gt 0 ]; then apt_get purge -y -q "${purge[@]}"; fi
 systemctl daemon-reload
 
-# ---- snapd: gone, and kept out ------------------------------------------------------------------
-# Only once the .deb agent is the one running (second pass under Image Builder, or a plain SSH
-# session by hand): removing snapd stops every snap service, including a snap SSM agent.
-cat >/etc/apt/preferences.d/codespace-no-snapd <<'EOF'
-Package: snapd
-Pin: release a=*
-Pin-Priority: -1
-EOF
-if [ "$NEED_REBOOT" = 0 ] && dpkg-query -W -f='${Status}' snapd 2>/dev/null | grep -q "install ok installed"; then
-  log "Purging snapd"
-  # Metapackages that depend on snapd (e.g. ubuntu-server) go with it. Mark what they pulled in as
-  # manually installed first, so a later `apt autoremove` doesn't strip the system.
-  for meta in $(apt-get -s purge snapd 2>/dev/null | awk '/^(Purg|Remv) / {print $2}'); do
-    case "$meta" in
-      ubuntu-*)
-        deps="$(apt-cache depends --installed "$meta" 2>/dev/null | awk '/(Depends|Recommends):/ {print $2}' | grep -v '^<' | sort -u || true)"
-        # shellcheck disable=SC2086
-        [ -n "$deps" ] && apt-mark manual $deps >/dev/null
-        ;;
-    esac
-  done
-  apt_get purge -y -q snapd
-fi
-apt-mark hold snapd >/dev/null 2>&1 || true
-if ! command -v snap >/dev/null 2>&1; then
-  rm -rf /snap /var/snap /var/lib/snapd /var/cache/snapd /root/snap /home/*/snap
-fi
-systemctl daemon-reload
-
 # ---- GPU sanity --------------------------------------------------------------------------------
 # The DLAMI ships the driver and CUDA; nothing to install. Build instances have no GPU, so a
 # failing nvidia-smi is only a warning here.
@@ -493,18 +409,8 @@ systemctl is-enabled codespace-spot-watcher.service ssh.service >/dev/null
 apt_get clean
 rm -rf /var/lib/apt/lists/* /root/.npm/_cacache 2>/dev/null || true
 
-# ---- Reboot handoff, or boot profile ------------------------------------------------------------
-if [ "$NEED_REBOOT" = 1 ]; then
-  if under_toe; then
-    log "Rebooting so the .deb SSM agent takes over; AWSTOE re-runs this step afterwards"
-    exit 194
-  fi
-  set +x
-  echo "The snap SSM agent is running this shell, so snapd can't be purged yet." >&2
-  echo "Reboot, reconnect (the .deb agent takes over), and run this script again." >&2
-  exit 0
-fi
-# This boot already ran without snapd's agent, so it shows where the remaining time goes.
+# ---- Boot profile ------------------------------------------------------------------------------
+# The build instance's boot, as a baseline for what's still slow before SSM answers.
 {
   echo "# codespace boot profile, $(date -u +%FT%TZ), variant=${VARIANT:-auto}, $(uname -r)"
   echo "## systemd-analyze"; systemd-analyze 2>&1 || true

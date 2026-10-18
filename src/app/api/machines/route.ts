@@ -1,5 +1,5 @@
 import { awsRegions } from "@/server/aws/config";
-import { offeredRegions, regionsStatus, spotPrices } from "@/server/aws/ec2";
+import { offeredRegions, quotas, regionsStatus, spotPrices, vcpuUsage, type Quotas } from "@/server/aws/ec2";
 import { DEFAULT_DISK_GB, DEFAULT_MACHINE, DISK_GB_STEPS, MACHINES } from "@/server/aws/machines";
 import { handle, json } from "@/server/http";
 
@@ -27,7 +27,7 @@ async function within<T>(what: string, p: Promise<T>, fallback: T): Promise<T> {
 export const GET = handle(async () => {
   const types = MACHINES.map((m) => m.type);
   const regions = awsRegions();
-  const [status, offered, prices] = await Promise.all([
+  const [status, offered, prices, limits] = await Promise.all([
     within(
       "region status",
       regionsStatus(),
@@ -36,7 +36,27 @@ export const GET = handle(async () => {
     within("offered regions", offeredRegions(types), {} as Record<string, string[]>),
     // One timeout per region, all in parallel: a slow region leaves only its own prices out.
     Promise.all(regions.map((r) => within(`spot prices in ${r}`, spotPrices(types, r), {} as Record<string, number>))),
+    // vCPU limits plus what the account already runs; null for a region means unknown.
+    Promise.all(
+      regions.map((r) =>
+        within(
+          `quotas in ${r}`,
+          Promise.all([quotas(r), vcpuUsage(r)]).then(([q, usage]): (Quotas & { usage: Quotas }) | null => (q ? { ...q, usage } : null)),
+          null,
+        ),
+      ),
+    ),
   ]);
   const spot = Object.fromEntries(regions.map((r, i) => [r, prices[i]]));
-  return json({ machines: MACHINES, defaultType: DEFAULT_MACHINE, diskSteps: DISK_GB_STEPS, defaultDiskGb: DEFAULT_DISK_GB, regions: status, offered, spot });
+  const quotaMap = Object.fromEntries(regions.map((r, i) => [r, limits[i]]));
+  return json({
+    machines: MACHINES,
+    defaultType: DEFAULT_MACHINE,
+    diskSteps: DISK_GB_STEPS,
+    defaultDiskGb: DEFAULT_DISK_GB,
+    regions: status,
+    offered,
+    spot,
+    quotas: quotaMap,
+  });
 });

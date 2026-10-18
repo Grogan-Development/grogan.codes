@@ -131,8 +131,7 @@ Notes:
 
 The image is trimmed so SSH over SSM answers soon after the instance reaches `running`. It stays on Ubuntu 22.04, which is on EC2's hibernation-supported list.
 
-- **SSM agent:** AWS's `.deb` package, run as a plain systemd service. snapd is purged, pinned and held so apt can't bring it back, and `/snap` is removed. The snap agent had to wait for snapd's seeding and mounts at every boot.
-  - The switch needs a reboot mid-build. The first pass exits 194, AWSTOE reboots the instance and re-runs the step under the `.deb` agent, and that pass purges snapd. Builds take a few minutes longer.
+- **SSM agent:** stays the snap Ubuntu ships. Swapping to AWS's `.deb` during the build doesn't work: the `.deb` refuses to install while the snap agent (the one running the build) is present. `/var/log/codespace-boot-profile.txt` records what's still slow.
 - **Masked:**
   - the apt-daily and apt-daily-upgrade timers, unattended-upgrades, motd-news, fwupd
   - ModemManager, multipathd, lxd-agent, landscape, the ubuntu-advantage timers, apport, pollinate
@@ -151,7 +150,7 @@ The image is trimmed so SSH over SSM answers soon after the instance reaches `ru
   - `quiet` (less serial-console output)
   - no menu timeout and no recordfail pause after an unclean stop
   - the hibinit agent's `resume=` settings and the DLAMI's parameters are untouched
-- **GPU images:** only snapd and the services above are removed. The DLAMI's NVIDIA driver, CUDA and their services are left as they are.
+- **GPU images:** only the services above are removed. The DLAMI's NVIDIA driver, CUDA and their services are left as they are.
 - **Measuring:** the second build pass writes `systemd-analyze`, `blame | head -20` and `critical-chain amazon-ssm-agent.service` to `/var/log/codespace-boot-profile.txt`. That's from the build instance's boot. On a workspace, run the same commands after a fresh launch to compare.
 
 ## Credentials for the app
