@@ -1,4 +1,4 @@
-# Codespace
+# grogan.codes
 
 A personal, single-user app for running coding work, and the Claude Code agent that does it, in cloud sandboxes instead of on the local machine.
 
@@ -6,7 +6,7 @@ A personal, single-user app for running coding work, and the Claude Code agent t
 
 **Workspace**:
 A persistent personal dev environment holding zero or more repos, where the user and the agent do coding work. Each workspace lives in exactly one sandbox.
-_Avoid_: Codespace (that is the app's name), project, environment
+_Avoid_: grogan.codes (that is the app's name), Codespace (its old name), project, environment
 
 **Repo**:
 A git repository cloned into a workspace. A workspace can gain or lose repos at any time.

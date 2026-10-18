@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* Palette from the Codespace redesign canvas: graphite ground, one signal accent (lime),
+/* Palette from the grogan.codes redesign canvas: graphite ground, one signal accent (lime),
    amber for "needs you", blue for questions, violet for GPUs. */
 :root {
   --bg: #0d0e0c;

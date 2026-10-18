@@ -6,7 +6,7 @@ const sans = Schibsted_Grotesk({ variable: "--font-schibsted", subsets: ["latin"
 const mono = JetBrains_Mono({ variable: "--font-jetbrains", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Codespace",
+  title: "grogan.codes",
   description: "Modal workspaces with Claude Code",
 };
 

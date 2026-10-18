@@ -1,4 +1,4 @@
-# Codespace
+# grogan.codes
 
 A local app (Next.js + SQLite) that runs your coding work in Modal sandboxes. Each sandbox runs your own Claude Code, which you drive from a composer in the browser. The only things on your Mac are this app and its SQLite file in `.data/`.
 
@@ -14,7 +14,7 @@ On first open, Settings asks for:
 - **Modal token**: a token ID and secret from modal.com → Settings → API tokens. If you have run `modal setup`, the app uses `~/.modal.toml` and you can leave these empty.
 - **Claude token**: run `claude setup-token` and paste the result.
 
-Tokens you enter are stored in the macOS Keychain under the service `codespace`. GitHub access comes from your local `gh auth token`.
+Tokens you enter are stored in the macOS Keychain under the service `codespace` (the app's internal name, kept so existing tokens keep working). GitHub access comes from your local `gh auth token`.
 
 ## What's in it
 

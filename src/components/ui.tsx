@@ -99,7 +99,7 @@ export function StateDot({ state }: { state: string }) {
 export function Logo() {
   return (
     <Link href="/" aria-label="All workspaces" className="flex size-7 items-center justify-center rounded-[7px] bg-accent text-[13px] font-bold text-bg">
-      cs
+      gc
     </Link>
   );
 }

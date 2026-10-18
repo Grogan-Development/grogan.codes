@@ -32,7 +32,7 @@ export function DeleteWorkspace({ id, name, onDone, onClose }: { id: string; nam
     <Modal title={`Delete ${name}`} onClose={onClose}>
       {phase === "confirm" && (
         <div className="space-y-3">
-          <p>This permanently deletes the sandbox and everything on its disk. Codespace checks for work that isn&apos;t pushed first.</p>
+          <p>This permanently deletes the sandbox and everything on its disk. grogan.codes checks for work that isn&apos;t pushed first.</p>
           <div className="flex justify-end gap-2">
             <Button onClick={onClose}>Cancel</Button>
             <Button variant="danger" onClick={() => attempt(false)}>

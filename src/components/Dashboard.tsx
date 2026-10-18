@@ -48,7 +48,7 @@ export function Dashboard() {
     <div className="min-h-screen">
       <header className="flex min-h-[52px] flex-wrap items-center gap-x-4 gap-y-2 border-b border-line px-4 py-2.5">
         <Logo />
-        <span className="text-[15px] font-semibold">Codespace</span>
+        <span className="text-[15px] font-semibold">grogan.codes</span>
         <div className="ml-auto flex items-center gap-3.5 text-xs text-muted">
           {settings && (
             <button onClick={() => setSettingsOpen(true)} className="flex gap-3.5 hover:text-text" title="Settings">
@@ -437,7 +437,7 @@ function NewWorkspace({ onClose, onCreated }: { onClose: () => void; onCreated: 
               {gpu ? (
                 <div className="flex gap-2.5 rounded-[10px] border border-[#5a4a26] bg-[#1a170f] px-3 py-2.5 text-xs leading-relaxed text-[#e8d3a6]">
                   <span className="flex size-[18px] shrink-0 items-center justify-center rounded-md bg-warn text-[11px] font-bold text-bg">!</span>
-                  GPU sandboxes can’t take memory snapshots. Codespace saves your files before it stops one, but running processes end.
+                  GPU sandboxes can’t take memory snapshots. grogan.codes saves your files before it stops one, but running processes end.
                 </div>
               ) : null}
             </div>
