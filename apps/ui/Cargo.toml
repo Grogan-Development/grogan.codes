@@ -1,0 +1,19 @@
+[package]
+name = "ui"
+description = "Grogan Code client UI: one static Leptos build for web, desktop and mobile."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+api-types.workspace = true
+console_error_panic_hook.workspace = true
+futures.workspace = true
+gloo-timers.workspace = true
+leptos.workspace = true
+leptos_router.workspace = true
+
+[lints]
+workspace = true

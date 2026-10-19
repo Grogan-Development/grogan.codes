@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = ["crates/api-types", "apps/ui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+authors = ["Grogan Development"]
+repository = "https://github.com/Grogan-Development/grogan.codes"
+
+[workspace.dependencies]
+api-types = { path = "crates/api-types" }
+console_error_panic_hook = "0.1.7"
+futures = { version = "0.3.31", default-features = false, features = ["std"] }
+gloo-timers = { version = "0.3.0", features = ["futures"] }
+leptos = { version = "0.8.22", features = ["csr"] }
+leptos_router = "0.8.17"
+serde = { version = "1.0", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+lto = true
+opt-level = "z"
+codegen-units = 1

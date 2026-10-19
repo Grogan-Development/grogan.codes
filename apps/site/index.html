@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Grogan Code — the code host that understands your code</title>
+    <meta
+      name="description"
+      content="Private git hosting, change requests, cached CI and an exact code graph on every revision. Bring your own Claude Code or API key. Open source, runs on AWS."
+    />
+    <link rel="canonical" href="https://grogan.codes/" />
+    <meta property="og:title" content="Grogan Code" />
+    <meta
+      property="og:description"
+      content="Git hosting, review, CI and an exact code graph pinned to every revision. Bring your own AI."
+    />
+    <meta property="og:url" content="https://grogan.codes/" />
+    <meta property="og:type" content="website" />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="nav">
+      <a class="wordmark" href="/">
+        <span class="mark" aria-hidden="true">g/</span>
+        Grogan Code
+      </a>
+      <nav aria-label="Primary">
+        <a href="#product">Product</a>
+        <a href="#graph">Graph</a>
+        <a href="#ai">Bring your own AI</a>
+        <a href="#open-source">Open source</a>
+      </nav>
+      <div class="nav-cta">
+        <a class="link" href="https://app.grogan.codes/login">Sign in</a>
+        <a class="button primary" href="https://app.grogan.codes/">Open the app</a>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Early access · Private repos · Apache-2.0</p>
+          <h1>Your code host should <em>understand</em> your code.</h1>
+          <p class="lede">
+            Grogan Code hosts git, reviews changes, runs CI and answers questions from one code
+            graph, pinned to every revision. Every answer cites the line it came from and says how
+            sure it is.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary large" href="https://app.grogan.codes/">Open the app</a>
+            <a class="button large" href="#open-source">Run it in your AWS account</a>
+          </div>
+          <div class="install">
+            <code id="install-cmd">curl -fsSL https://grogan.codes/install | sh</code>
+            <button class="copy" type="button" data-copy="install-cmd">Copy</button>
+          </div>
+        </div>
+
+        <figure class="terminal" aria-label="Example: asking the code graph a question">
+          <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span></div>
+          <pre><span class="prompt">$</span> grogan ask "what calls Principal::allows?"
+<span class="dim">graph @ 0705846 · 214 files · exact 78%</span>
+
+<span class="tag exact">exact</span> crates/api/src/repo.rs:142     <b>push_refs</b>
+       if !principal.allows(Perm::Write, &amp;repo) {
+<span class="tag exact">exact</span> crates/source/src/merge.rs:219 <b>accept</b>
+       ensure!(principal.allows(Perm::Maintain, &amp;cr.repo), Denied);
+<span class="tag cand">cand</span> crates/api/src/admin.rs:88    <b>force_update</b>
+       principal.allows(Perm::Admin, &amp;repo)
+
+<span class="dim">3 callers · 1 inferred — verify before relying on it</span></pre>
+        </figure>
+      </section>
+
+      <section id="product" class="section">
+        <header class="section-head">
+          <p class="eyebrow">One graph, every workflow</p>
+          <h2>Everything reads the same revision.</h2>
+          <p class="lede">
+            Browsing, review, CI and AI all ask the same graph about the same commit, so a review
+            comment, a failing test and an answer in chat agree about what the code does.
+          </p>
+        </header>
+        <div class="features">
+          <article class="feature">
+            <p class="feature-num">01</p>
+            <h3>Source</h3>
+            <p>
+              Plain git over HTTPS, stored in S3. Protected refs only move through an atomic
+              compare-and-swap, so 50 parallel pushes give exactly one winner.
+            </p>
+          </article>
+          <article class="feature">
+            <p class="feature-num">02</p>
+            <h3>Change requests</h3>
+            <p>
+              Revisions, range diffs, comments that follow the code, stacks and a merge queue.
+              Approvals survive a clean rebase and reset on a real change.
+            </p>
+          </article>
+          <article class="feature">
+            <p class="feature-num">03</p>
+            <h3>Code graph</h3>
+            <p>
+              Definitions, calls, references and impact for Rust, TypeScript, Python and Go, from
+              compiler indexes where possible and inference where not.
+            </p>
+          </article>
+          <article class="feature">
+            <p class="feature-num">04</p>
+            <h3>Build</h3>
+            <p>
+              Steps are cached by their inputs, so an unchanged commit finishes in seconds. Jobs
+              run in throwaway micro-VMs with no access to your secrets unless you allow it.
+            </p>
+          </article>
+          <article class="feature">
+            <p class="feature-num">05</p>
+            <h3>Spaces</h3>
+            <p>
+              A cloud dev machine per repo that hibernates when you stop typing and resumes where
+              you left off. Connect from the CLI or VS Code.
+            </p>
+          </article>
+          <article class="feature">
+            <p class="feature-num">06</p>
+            <h3>Ask, review, fix</h3>
+            <p>
+              Ask questions, get advisory reviews, triage red builds and hand a failure to an agent
+              that opens a change request. AI never approves or merges.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section id="graph" class="section split">
+        <div>
+          <p class="eyebrow">Answers you can check</p>
+          <h2>Exact when it knows. Labelled when it doesn't.</h2>
+          <p class="lede">
+            Results from a compiler index are marked <span class="tag exact">exact</span>.
+            Results the graph inferred are marked <span class="tag cand">cand</span> and ranked
+            below them. Every line inlines its source, so you and your agent spend fewer tokens
+            opening files to confirm.
+          </p>
+          <ul class="checks">
+            <li>Citations are checked against the graph before they're shown.</li>
+            <li>Answers name the revision they were computed at.</li>
+            <li>Queries have time and memory budgets, and say when they're truncated.</li>
+          </ul>
+        </div>
+        <figure class="panel" aria-label="Example change request impact">
+          <p class="panel-title">#42 Projection read cache · impact</p>
+          <ol class="gates">
+            <li class="bad"><span>✕</span> Required checks <small>test failed on c3d07f1</small></li>
+            <li><span>✓</span> Linear history <small>fast-forward possible</small></li>
+            <li class="bad"><span>✕</span> 1 code-owner approval <small>0 of 1</small></li>
+          </ol>
+          <p class="panel-sub">AI review · advisory</p>
+          <p class="finding">
+            <b>risk</b> crates/source/src/projection.rs:88 — cache key omits the grant's revocation
+            epoch.
+          </p>
+        </figure>
+      </section>
+
+      <section id="ai" class="section">
+        <header class="section-head">
+          <p class="eyebrow">Bring your own AI</p>
+          <h2>We don't resell tokens.</h2>
+          <p class="lede">
+            Connect what you already pay for. On the desktop app, AI runs on your machine with your
+            own login. In the browser and for background work, it runs in an isolated sandbox
+            billed to your key.
+          </p>
+        </header>
+        <ul class="providers">
+          <li><code>claude auth login</code><span>Claude Code</span></li>
+          <li><code>codex login</code><span>Codex CLI</span></li>
+          <li><code>ANTHROPIC_API_KEY</code><span>Anthropic API</span></li>
+          <li><code>grogan mcp</code><span>Graph tools for your local agent</span></li>
+        </ul>
+      </section>
+
+      <section id="open-source" class="section split dark">
+        <div>
+          <p class="eyebrow">Open source</p>
+          <h2>Use ours, or run your own.</h2>
+          <p class="lede">
+            Grogan Code is Apache-2.0. One command installs it into your own AWS account, with
+            near-zero idle cost: serverless control plane, Spot build hosts that only run while
+            you're building.
+          </p>
+        </div>
+        <figure class="terminal">
+          <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span></div>
+          <pre><span class="prompt">$</span> grogan install --region us-west-2
+<span class="dim">✓ control plane   Lambda · DynamoDB · S3
+✓ edge            CloudFront · WAF
+✓ build fleet     Spot Firecracker hosts (scale to zero)
+✓ web app         https://d1a2b3c4.cloudfront.net</span>
+<span class="prompt">$</span> grogan repo create api --from .</pre>
+        </figure>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p class="wordmark small"><span class="mark" aria-hidden="true">g/</span> Grogan Code</p>
+      <p class="muted">Built by Grogan Development. Licensed under Apache-2.0.</p>
+      <nav aria-label="Footer">
+        <a href="https://app.grogan.codes/">App</a>
+        <a href="https://github.com/Grogan-Development/grogan.codes">Source</a>
+      </nav>
+    </footer>
+
+    <script>
+      document.querySelectorAll("[data-copy]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const text = document.getElementById(button.dataset.copy)?.textContent ?? "";
+          await navigator.clipboard.writeText(text);
+          button.textContent = "Copied";
+          setTimeout(() => (button.textContent = "Copy"), 1600);
+        });
+      });
+    </script>
+  </body>
+</html>
