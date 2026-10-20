@@ -27,6 +27,9 @@ all = { level = "deny", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
 
+[profile.dev]
+debug = 0
+
 [profile.release]
 lto = true
 opt-level = "z"

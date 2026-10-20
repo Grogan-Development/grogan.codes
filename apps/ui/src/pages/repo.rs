@@ -1,4 +1,4 @@
-use api_types::{EntryKind, RepoRef};
+use api_types::{AdmissionSource, EntryKind, RepoRef};
 use leptos::prelude::*;
 use leptos_router::{
     components::{A, Outlet},
@@ -38,9 +38,8 @@ pub fn RepoLayout() -> impl IntoView {
                 <nav class="tabs" aria-label="Repository">
                     <A href=base exact=true>"Code"</A>
                     <A href=tab("/changes")>"Change requests"</A>
-                    <A href=tab("/graph")>"Search & graph"</A>
-                    <A href=tab("/ask")>"Ask"</A>
-                    <A href=tab("/builds/b-c3d07f1")>"Build"</A>
+                    <A href=tab("/graph")>"Wiki"</A>
+                    <A href=tab("/builds")>"Build"</A>
                     <A href=tab("/spaces")>"Spaces"</A>
                     <A href=tab("/settings")>"Settings"</A>
                 </nav>
@@ -59,10 +58,13 @@ pub fn RepoCode() -> impl IntoView {
         let repo = repo.get();
         async move { platform.repo_home(repo).await }
     });
+    let file_filter = RwSignal::new(String::new());
+    let show_clone = RwSignal::new(false);
+    let selected_entry = RwSignal::new(String::new());
 
     view! {
         <section class="page">
-            {load(home, |home| {
+            {load(home, move |home| {
                 let base = home.repo.id.path();
                 let languages = home
                     .repo
@@ -72,6 +74,19 @@ pub fn RepoCode() -> impl IntoView {
                     .collect::<Vec<_>>()
                     .join(" · ");
                 let graph = home.repo.graph.clone();
+                let graph_revision = graph.revision.clone();
+                let protected_ref = home.repo.protected_ref.clone();
+                let protected_ref_show = protected_ref.clone();
+                let base_link = base.clone();
+                let owner = home.repo.id.owner.clone();
+                let name = home.repo.id.name.clone();
+                let query = file_filter.get().to_lowercase();
+                let visible: Vec<_> = home
+                    .entries
+                    .clone()
+                    .into_iter()
+                    .filter(|entry| query.is_empty() || entry.name.to_lowercase().contains(&query))
+                    .collect();
                 view! {
                     <div class="repo-grid">
                         <div class="repo-main">
@@ -81,9 +96,39 @@ pub fn RepoCode() -> impl IntoView {
                                     {format!("{} branches · {} tags", home.repo.branches, home.repo.tags)}
                                 </span>
                                 <span class="spacer"></span>
-                                <button class="button">"Go to file"</button>
-                                <button class="button primary">"Clone ▾"</button>
+                                <input
+                                    type="search"
+                                    class="file-filter"
+                                    placeholder="Go to file…"
+                                    aria-label="Go to file"
+                                    prop:value=move || file_filter.get()
+                                    on:input=move |event| file_filter.set(event_target_value(&event))
+                                />
+                                <button
+                                    type="button"
+                                    class="button primary"
+                                    on:click=move |_| show_clone.update(|v| *v = !*v)
+                                >
+                                    "Clone ▾"
+                                </button>
                             </div>
+                            <Show when=move || show_clone.get()>
+                                <div class="card clone-card">
+                                    <p class="small strong mono">"Clone this repository"</p>
+                                    <p class="mono small">
+                                        {format!(
+                                            "git clone https://grogan.codes/git/{}/{}.git",
+                                            owner.clone(),
+                                            name.clone(),
+                                        )}
+                                    </p>
+                                    <p class="small muted">
+                                        "Protected ref " <code>{protected_ref_show.clone()}</code>
+                                        " only moves through change-request accept (Gate 2 + atomic CAS). "
+                                        "Push a worktree branch and open a change request instead."
+                                    </p>
+                                </div>
+                            </Show>
                             <div class="commit-row">
                                 <span class="strong">{home.head.author}</span>
                                 <span class="commit-msg">{home.head.message}</span>
@@ -92,18 +137,25 @@ pub fn RepoCode() -> impl IntoView {
                                 <span class="muted">{home.head.age}</span>
                             </div>
                             <ul class="tree">
-                                {home
-                                    .entries
+                                {visible
                                     .into_iter()
                                     .map(|entry| {
-                                        let (icon, name) = match entry.kind {
+                                        let (icon, display) = match entry.kind {
                                             EntryKind::Dir => ("▸", format!("{}/", entry.name)),
-                                            EntryKind::File => ("·", entry.name),
+                                            EntryKind::File => ("·", entry.name.clone()),
                                         };
+                                        let entry_name = entry.name.clone();
                                         view! {
-                                            <li class="tree-row">
+                                            <li
+                                                class="tree-row tree-row-btn"
+                                                class:active=move || selected_entry.get() == entry_name
+                                                on:click={
+                                                    let entry_name = entry.name.clone();
+                                                    move |_| selected_entry.set(entry_name.clone())
+                                                }
+                                            >
                                                 <span class="muted" aria-hidden="true">{icon}</span>
-                                                <span class="mono">{name}</span>
+                                                <span class="mono">{display}</span>
                                                 <span class="muted truncate">{entry.last_message}</span>
                                                 <span class="muted">{entry.age}</span>
                                             </li>
@@ -111,10 +163,33 @@ pub fn RepoCode() -> impl IntoView {
                                     })
                                     .collect_view()}
                             </ul>
+                            {move || {
+                                let picked = selected_entry.get();
+                                if picked.is_empty() {
+                                    return view! { <span></span> }.into_any();
+                                }
+                                view! {
+                                    <div class="card entry-preview">
+                                        <p class="mono small">
+                                            <span class="strong">{picked.clone()}</span>
+                                            {format!(" · blob/tree @ {} · last change above", graph_revision)}
+                                        </p>
+                                        <p class="small muted">
+                                            "Served from the CAS tree at the head revision — the same materialization "
+                                            "the code graph, CI and DeepWiki read."
+                                        </p>
+                                        <A href=format!("{base_link}/graph?q={picked}") attr:class="button">
+                                            "Open in DeepWiki →"
+                                        </A>
+                                    </div>
+                                }
+                                    .into_any()
+                            }}
                             <article class="card readme">
                                 <h2 class="card-title">"README.md"</h2>
                                 {home
                                     .readme
+                                    .clone()
                                     .into_iter()
                                     .map(|line| match line.strip_prefix("# ") {
                                         Some(title) => view! { <h3>{title.to_owned()}</h3> }.into_any(),
@@ -128,6 +203,56 @@ pub fn RepoCode() -> impl IntoView {
                                 <h2 class="card-title">"About"</h2>
                                 <p>{home.repo.description}</p>
                                 <p class="muted small">{languages}</p>
+                                <ul class="mini-list" style="margin-top:8px">
+                                    <li>
+                                        <span class="muted">"Protected ref"</span>
+                                        <code>{protected_ref.clone()}</code>
+                                    </li>
+                                    <li>
+                                        <span class="muted">"CI policy"</span>
+                                        <span class="mono small">"loom-ci.toml"</span>
+                                    </li>
+                                    <li>
+                                        <span class="muted">"Storage"</span>
+                                        <span class="mono small">"CAS on S3"</span>
+                                    </li>
+                                </ul>
+                            </div>
+                            <div class="card">
+                                <h2 class="card-title">"How refs moved (admissions)"</h2>
+                                <ul class="mini-list">
+                                    {home
+                                        .admissions
+                                        .into_iter()
+                                        .map(|admission| {
+                                            let source = match admission.source {
+                                                AdmissionSource::GitPush => "git push",
+                                                AdmissionSource::Import => "import",
+                                                AdmissionSource::NativeCommit => "native commit",
+                                                AdmissionSource::ChangeRequestAccept => "CR accept (CAS)",
+                                            };
+                                            view! {
+                                                <li>
+                                                    <span>
+                                                        <span class="strong small">{source}</span>
+                                                        <br/>
+                                                        <span class="mono muted small">
+                                                            {format!(
+                                                                "{} → {}",
+                                                                admission.base.as_deref().unwrap_or("∅"),
+                                                                admission.head,
+                                                            )}
+                                                        </span>
+                                                    </span>
+                                                    <span class="muted small">{admission.age}</span>
+                                                </li>
+                                            }
+                                        })
+                                        .collect_view()}
+                                </ul>
+                                <p class="small muted">
+                                    "Every non-empty tree records an admission edge; CI never runs inside receive-pack."
+                                </p>
                             </div>
                             <A href=format!("{base}/graph") attr:class="card link-card">
                                 <h2 class="card-title">{format!("Code graph @ {}", graph.revision)}</h2>
@@ -143,8 +268,8 @@ pub fn RepoCode() -> impl IntoView {
                                     <span style:width=format!("{}%", graph.exact_percent)></span>
                                 </div>
                             </A>
-                            <A href=format!("{base}/ask") attr:class="card link-card accent">
-                                <h2 class="card-title">"Ask this repo"</h2>
+                            <A href=format!("{base}/graph?q=Where+are+refs+updated+on+push%3F") attr:class="card link-card accent">
+                                <h2 class="card-title">"Ask the wiki"</h2>
                                 <p class="small">
                                     "“Where are refs updated on push?” → answer with "
                                     <code>"path:line"</code>

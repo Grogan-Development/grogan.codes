@@ -2,11 +2,14 @@
 //! states are visible; nothing here touches the network.
 
 use api_types::{
-    AiConnection, AiProvider, AiRunsOn, ApiError, BuildRun, BuildStep, ChangeDetail, ChangeState,
-    ChangeSummary, Check, CheckState, CommitSummary, DiffFile, DiffLine, DiffLineKind, EntryKind,
-    Finding, Gate, GraphHit, GraphSummary, InboxItem, InboxKind, LanguageShare, Org, OrgRole, Plan,
-    Repo, RepoHome, RepoRef, Revision, SearchResults, Session, Severity, StepState, Tier,
-    TreeEntry, Triage, User,
+    Admission, AdmissionSource, AiBilling, AiConnection, AiProvider, AiRunsOn, ApiError, BuildRun,
+    BuildStep, BuildStepSummary, BuildSummary, ChangeDetail, ChangeState, ChangeSummary, Check,
+    CheckState, CiPolicy, CommitSummary, DeployTarget, DiffFile, DiffLine, DiffLineKind, EntryKind,
+    EvidenceBundle, Finding, Gate, GateStage, GenerationStatus, GraphHit, GraphSummary, InboxItem,
+    InboxKind, LanguageShare, MapIdentity, MapStatus, ModelProvenance, Org, OrgRole, Plan, Repo,
+    RepoHome, RepoMap, RepoRef, ReviewComment, ReviewVerdict, Revision, Scenario, SearchResults,
+    Session, Severity, Space, SpaceAgent, SpaceStatus, StepState, SupportsEdge, Tier, TreeEntry,
+    Triage, User,
 };
 use gloo_timers::future::TimeoutFuture;
 
@@ -81,6 +84,9 @@ fn repo(
         id: RepoRef::new(owner, name),
         description: s(description),
         default_branch: s("main"),
+        protected_ref: s("refs/main"),
+        ci_policy: CiPolicy::LoomCi,
+        deploy_target: DeployTarget::None,
         branches: 3,
         tags: 41,
         languages,
@@ -297,6 +303,30 @@ fn repo_home(id: &RepoRef) -> Result<RepoHome, ApiError> {
             .into_iter()
             .filter(|change| change.state != ChangeState::Merged)
             .collect(),
+        // Admission ledger edges (Loom `admissions/`): how the protected ref last moved.
+        admissions: vec![
+            Admission {
+                source: AdmissionSource::ChangeRequestAccept,
+                ref_name: Some(s("refs/main")),
+                base: Some(s("9be21c4")),
+                head: s("0705846"),
+                age: s("2h ago"),
+            },
+            Admission {
+                source: AdmissionSource::GitPush,
+                ref_name: Some(s("refs/heads/zack/projection-cache")),
+                base: None,
+                head: s("c3d07f1"),
+                age: s("2h ago"),
+            },
+            Admission {
+                source: AdmissionSource::Import,
+                ref_name: Some(s("refs/main")),
+                base: None,
+                head: s("41aa90e"),
+                age: s("3mo ago"),
+            },
+        ],
         repo,
     })
 }
@@ -402,15 +432,23 @@ fn change_detail(id: &RepoRef, number: u32) -> Result<ChangeDetail, ApiError> {
                 severity: Severity::Risk,
                 path: s("crates/source/src/projection.rs"),
                 line: 88,
+                end_line: 91,
                 message: s(
                     "Cache key omits the grant's revocation epoch, so a revoked grant can read cached rows until eviction.",
                 ),
+                suggested_fix: Some(s("let key = (grant.id, grant.revocation_epoch, rev);")),
+                approved: false,
+                applied: false,
             },
             Finding {
                 severity: Severity::Info,
                 path: s("crates/source/src/projection.rs"),
                 line: 131,
+                end_line: 131,
                 message: s("Eviction walks every entry; consider indexing by grant."),
+                suggested_fix: None,
+                approved: false,
+                applied: false,
             },
         ],
         impact: vec![
@@ -460,6 +498,54 @@ fn change_detail(id: &RepoRef, number: u32) -> Result<ChangeDetail, ApiError> {
                 diff_line(DiffLineKind::Context, 92, "    pack.project(grant.scope())"),
             ],
         }],
+        // Two-gate contract (Loom features.rs): Gate 1 approved the contract,
+        // a candidate is under CI + review, Gate 2 (accept + CAS) is pending.
+        gate_stage: GateStage::Gate1Approved,
+        scenarios: vec![
+            Scenario {
+                name: s("Revoked grant reads nothing"),
+                given: s("a grant with 3 cached projection rows"),
+                when: s("the grant is revoked and read again at the same revision"),
+                then: s("the read returns 0 rows (cache key includes revocation epoch)"),
+                passed: !failed,
+            },
+            Scenario {
+                name: s("Warm cache still hits"),
+                given: s("an unrevoked grant read twice at one revision"),
+                when: s("the second read executes"),
+                then: s("rows come from cache and the pack is not re-opened"),
+                passed: true,
+            },
+        ],
+        evidence: Some(EvidenceBundle {
+            digest: s("sha256:51b07c…e91a"),
+            tests_passed: !failed,
+            job_id: s("job_01j…c3d07f1"),
+        }),
+        review_verdict: Some(if failed {
+            ReviewVerdict::RequestChanges
+        } else {
+            ReviewVerdict::Approve
+        }),
+        comments: vec![
+            ReviewComment {
+                author: s("agent:claude-code"),
+                body: s(
+                    "Cache key at projection.rs:87 is (grant.id, rev) — revocation epoch is missing, so the failing test is a real bug, not a flake. Suggested patch attached to the finding.",
+                ),
+                age: s("2h ago"),
+                finding_path: Some(s("crates/source/src/projection.rs:88")),
+            },
+            ReviewComment {
+                author: s("zack"),
+                body: s(
+                    "Agreed. Apply the suggested patch as revision 3 and re-run only the `test` step — lint is already cached for this tree.",
+                ),
+                age: s("1h ago"),
+                finding_path: None,
+            },
+        ],
+        rollback_available: true,
         summary,
     })
 }
@@ -480,6 +566,12 @@ fn build(id: &RepoRef, build_id: &str) -> Result<BuildRun, ApiError> {
         id: s(build_id),
         repo: id.clone(),
         commit: s("c3d07f1"),
+        git_oid: s("c3d07f1a9e2b44d0b6f1a2c3d4e5f60718293a4b"),
+        source_key: s("ci-v2:loom-ci-worker.v1:uid=1001:9f1e…a2|zack/grogan-code:0705846:c3d07f1"),
+        ref_name: Some(s("refs/heads/zack/projection-cache")),
+        attempts: 1,
+        cached_from: None,
+        evidence_digest: Some(s("sha256:51b07c…e91a")),
         trigger: s("Change request #42 · revision 2"),
         state: CheckState::Failed,
         backend: s("Spot Firecracker · c8i.4xlarge · us-west-2"),
@@ -514,6 +606,273 @@ fn build(id: &RepoRef, build_id: &str) -> Result<BuildRun, ApiError> {
             confidence: 86,
         }),
     })
+}
+
+fn builds_for(id: &RepoRef) -> Vec<BuildSummary> {
+    if id.name != "grogan-code" {
+        return Vec::new();
+    }
+    let row = |id: &str,
+               state: CheckState,
+               title: &str,
+               trigger: &str,
+               commit: &str,
+               duration: &str,
+               saved: &str,
+               steps: [(&str, StepState); 3],
+               age: &str| BuildSummary {
+        id: s(id),
+        title: s(title),
+        trigger: s(trigger),
+        commit: s(commit),
+        state,
+        duration: s(duration),
+        saved: s(saved),
+        steps: steps
+            .into_iter()
+            .map(|(name, state)| BuildStepSummary {
+                name: s(name),
+                state,
+            })
+            .collect(),
+        age: s(age),
+    };
+    vec![
+        row(
+            "b-c3d07f1",
+            CheckState::Failed,
+            "#42 Projection read cache · rev 2",
+            "change_request · zack",
+            "c3d07f1",
+            "3m 12s",
+            "saved 1m 48s (1/3 cached)",
+            [
+                ("lint", StepState::Cached),
+                ("test", StepState::Failed),
+                ("image", StepState::Skipped),
+            ],
+            "2h ago",
+        ),
+        row(
+            "b-0705846",
+            CheckState::Passed,
+            "main · Enforce Principal::allows across admin routes",
+            "git_push · refs/main",
+            "0705846",
+            "44s",
+            "saved 4m 19s (2/3 cached)",
+            [
+                ("lint", StepState::Cached),
+                ("test", StepState::Cached),
+                ("image", StepState::Passed),
+            ],
+            "4h ago",
+        ),
+        row(
+            "b-91e4a10",
+            CheckState::Passed,
+            "#41 CI worker retry budget · rev 1 (agent fix)",
+            "agent_run · claude-code",
+            "91e4a10",
+            "1m 52s",
+            "saved 2m 50s (1/3 cached)",
+            [
+                ("lint", StepState::Cached),
+                ("test", StepState::Passed),
+                ("image", StepState::Passed),
+            ],
+            "6h ago",
+        ),
+        row(
+            "b-4d18c02",
+            CheckState::Passed,
+            "#39 Scoped tokens in repos list · rev 3",
+            "change_request · zack",
+            "4d18c02",
+            "12s",
+            "saved 4m 55s (3/3 cached)",
+            [
+                ("lint", StepState::Cached),
+                ("test", StepState::Cached),
+                ("image", StepState::Cached),
+            ],
+            "1d ago",
+        ),
+    ]
+}
+
+fn repo_map(id: &RepoRef) -> Result<RepoMap, ApiError> {
+    let repo = find_repo(id)?;
+    let identity = |id: &str, kind: &str, paths: Vec<&str>| MapIdentity {
+        id: s(id),
+        kind: s(kind),
+        paths: paths.into_iter().map(s).collect(),
+    };
+    Ok(RepoMap {
+        revision: repo.graph.revision.clone(),
+        status: MapStatus::Ready,
+        generation: Some(s("gen_01j…0705846")),
+        generation_status: Some(GenerationStatus::Complete),
+        identities: vec![
+            identity(
+                "auth-gate",
+                "feature",
+                vec!["crates/auth/src/principal.rs (Principal::allows)"],
+            ),
+            identity(
+                "git-receive",
+                "feature",
+                vec!["crates/api/src/repo.rs (push_refs)"],
+            ),
+            identity(
+                "merge-queue",
+                "feature",
+                vec!["crates/source/src/merge.rs (accept)"],
+            ),
+            identity(
+                "cas-store",
+                "substrate",
+                vec![
+                    "crates/source/src/projection.rs",
+                    "crates/source/src/pack.rs",
+                ],
+            ),
+            identity(
+                "audit-log",
+                "substrate",
+                vec!["crates/auth/src/audit.rs (AuditLog::record)"],
+            ),
+        ],
+        supports: vec![
+            SupportsEdge {
+                source: s("cas-store"),
+                target: s("git-receive"),
+                shared: true,
+                confidence: Some(98),
+                anchors: vec![s("crates/api/src/repo.rs:142")],
+            },
+            SupportsEdge {
+                source: s("cas-store"),
+                target: s("merge-queue"),
+                shared: true,
+                confidence: Some(96),
+                anchors: vec![s("crates/source/src/merge.rs:219")],
+            },
+            SupportsEdge {
+                source: s("audit-log"),
+                target: s("auth-gate"),
+                shared: false,
+                confidence: Some(99),
+                anchors: vec![s("crates/auth/src/principal.rs:57")],
+            },
+        ],
+        // Provenance of the run that produced this generation (maps.rs):
+        // provider/model/route + token usage, never a credential.
+        provenance: Some(ModelProvenance {
+            provider: s("zai"),
+            model: s("glm-5.1"),
+            route: s("grogan-managed-credits"),
+            input_tokens: 184_203,
+            output_tokens: 21_940,
+            cost_micros: 412_000,
+        }),
+        job_state: None,
+    })
+}
+
+fn spaces_for(org: &str) -> Vec<Space> {
+    if org == "grogan-dev" {
+        return Vec::new();
+    }
+    let main = RepoRef::new("zack", "grogan-code");
+    vec![
+        Space {
+            id: s("space-42"),
+            name: s("projection-epoch-fix"),
+            repo: main.clone(),
+            branch: s("zack/projection-cache"),
+            status: SpaceStatus::Running,
+            agent: SpaceAgent {
+                provider: AiProvider::ClaudeCode,
+                model: s("claude-opus-4.7"),
+                billing: AiBilling::BringYourOwn,
+            },
+            machine: s("8 vCPU · 16 GB"),
+            task: s("Fix cache revocation epoch on CR #42"),
+            change_number: Some(42),
+            tests: Some(s("211/212 passing (1 known failure)")),
+            idle_for: None,
+            log: vec![
+                s("$ grogan mcp query --callers Principal::allows"),
+                s("3 callers from graph @ 0705846 in 11ms (2 exact, 1 cand)"),
+                s("$ cargo nextest run -p source projection"),
+                s("FAIL revoked_grant_cannot_read_cache — root cause pinned to projection.rs:87"),
+                s("agent: suggested patch ready on CR #42 finding 1 (awaiting human approve)"),
+            ],
+        },
+        Space {
+            id: s("space-41"),
+            name: s("ci-retry-budget"),
+            repo: main.clone(),
+            branch: s("agent/ci-retry-budget"),
+            status: SpaceStatus::Running,
+            agent: SpaceAgent {
+                provider: AiProvider::Zai,
+                model: s("glm-5.1"),
+                billing: AiBilling::BringYourOwn,
+            },
+            machine: s("4 vCPU · 8 GB"),
+            task: s("Bounded retry budget for CI worker leases"),
+            change_number: Some(41),
+            tests: Some(s("212/212 passing")),
+            idle_for: None,
+            log: vec![
+                s("$ grogan change submit --feature ci-retry-budget"),
+                s("candidate 91e4a10 queued · CI job job_01j…91e4 (digest-cached lint)"),
+                s("CI passed in 1m 52s · evidence sha256:9be2…44d0"),
+            ],
+        },
+        Space {
+            id: s("space-43"),
+            name: s("go-indexer-bench"),
+            repo: main,
+            branch: s("agent/go-indexer-bench"),
+            status: SpaceStatus::Starting,
+            agent: SpaceAgent {
+                provider: AiProvider::MiniMax,
+                model: s("minimax-m2.7"),
+                billing: AiBilling::ManagedCredits,
+            },
+            machine: s("8 vCPU · 16 GB"),
+            task: s("Benchmark SCIP Go indexer against trace-db corpus"),
+            change_number: None,
+            tests: None,
+            idle_for: None,
+            log: vec![s(
+                "provisioning disposable VM (worker fingerprint loom-ci-worker.v1:…)",
+            )],
+        },
+        Space {
+            id: s("space-trace"),
+            name: s("trace-db-dev"),
+            repo: RepoRef::new("zack", "trace-db"),
+            branch: s("main"),
+            status: SpaceStatus::Hibernated,
+            agent: SpaceAgent {
+                provider: AiProvider::Mimo,
+                model: s("mimo-7b-rl"),
+                billing: AiBilling::ManagedCredits,
+            },
+            machine: s("4 vCPU · 8 GB"),
+            task: s("Trace store query planner experiments"),
+            change_number: None,
+            tests: None,
+            idle_for: Some(s("hibernated after 30m idle · $0/hr · resumes in <1s")),
+            log: vec![s(
+                "idle 30m — snapshot sealed, VM released (lease expired cleanly)",
+            )],
+        },
+    ]
 }
 
 fn search(id: &RepoRef, query: &str) -> Result<SearchResults, ApiError> {
@@ -643,17 +1002,34 @@ impl Platform for MockPlatform {
     }
 
     fn ai_connections(&self) -> Reply<'_, Vec<AiConnection>> {
-        let mut connections = vec![AiConnection {
-            provider: AiProvider::AnthropicApiKey,
-            runs_on: AiRunsOn::UserSandbox,
-            account: s("sk-ant-…4f2a"),
-        }];
+        // Both payment modes: Grogan-managed credits AND bring-your-own plans.
+        let mut connections = vec![
+            AiConnection {
+                provider: AiProvider::Zai,
+                runs_on: AiRunsOn::UserSandbox,
+                billing: AiBilling::ManagedCredits,
+                account: s("Grogan credits · balance $18.42"),
+            },
+            AiConnection {
+                provider: AiProvider::AnthropicApiKey,
+                runs_on: AiRunsOn::UserSandbox,
+                billing: AiBilling::BringYourOwn,
+                account: s("sk-ant-…4f2a"),
+            },
+            AiConnection {
+                provider: AiProvider::MiniMax,
+                runs_on: AiRunsOn::UserSandbox,
+                billing: AiBilling::BringYourOwn,
+                account: s("MiniMax Coding Plan · minimax_…8c1d"),
+            },
+        ];
         if self.capabilities().local_ai {
             connections.insert(
                 0,
                 AiConnection {
                     provider: AiProvider::ClaudeCode,
                     runs_on: AiRunsOn::ThisDevice,
+                    billing: AiBilling::BringYourOwn,
                     account: s("zack@grogan.codes"),
                 },
             );
@@ -684,11 +1060,23 @@ impl Platform for MockPlatform {
         reply(change_detail(&repo, number))
     }
 
+    fn builds(&self, repo: RepoRef) -> Reply<'_, Vec<BuildSummary>> {
+        reply(find_repo(&repo).map(|_| builds_for(&repo)))
+    }
+
     fn build(&self, repo: RepoRef, id: String) -> Reply<'_, BuildRun> {
         reply(build(&repo, &id))
     }
 
     fn search(&self, repo: RepoRef, query: String) -> Reply<'_, SearchResults> {
         reply(search(&repo, &query))
+    }
+
+    fn repo_map(&self, repo: RepoRef) -> Reply<'_, RepoMap> {
+        reply(repo_map(&repo))
+    }
+
+    fn spaces(&self, org: String) -> Reply<'_, Vec<Space>> {
+        reply(Ok(spaces_for(&org)))
     }
 }

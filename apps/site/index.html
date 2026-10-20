@@ -3,16 +3,16 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Grogan Code — the code host that understands your code</title>
+    <title>Grogan Code — Full GitHub replacement for humans and agents</title>
     <meta
       name="description"
-      content="Private git hosting, change requests, cached CI and an exact code graph on every revision. Bring your own Claude Code or API key. Open source, runs on AWS."
+      content="Repos, stacked code reviews, GraphWiki, micro-VM builds, and AI-managed Spaces. Buy managed token credits or bring your own subscription."
     />
     <link rel="canonical" href="https://grogan.codes/" />
     <meta property="og:title" content="Grogan Code" />
     <meta
       property="og:description"
-      content="Git hosting, review, CI and an exact code graph pinned to every revision. Bring your own AI."
+      content="Full GitHub replacement: Repos, stacked reviews, GraphWiki, micro-VM builds, and AI-managed Spaces."
     />
     <meta property="og:url" content="https://grogan.codes/" />
     <meta property="og:type" content="website" />
@@ -21,212 +21,935 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
     />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <header class="nav">
-      <a class="wordmark" href="/">
-        <span class="mark" aria-hidden="true">g/</span>
-        Grogan Code
-      </a>
-      <nav aria-label="Primary">
-        <a href="#product">Product</a>
-        <a href="#graph">Graph</a>
-        <a href="#ai">Bring your own AI</a>
-        <a href="#open-source">Open source</a>
-      </nav>
-      <div class="nav-cta">
-        <a class="link" href="https://app.grogan.codes/login">Sign in</a>
-        <a class="button primary" href="https://app.grogan.codes/">Open the app</a>
-      </div>
-    </header>
-
-    <main>
-      <section class="hero">
-        <div class="hero-copy">
-          <p class="eyebrow">Early access · Private repos · Apache-2.0</p>
-          <h1>Your code host should <em>understand</em> your code.</h1>
-          <p class="lede">
-            Grogan Code hosts git, reviews changes, runs CI and answers questions from one code
-            graph, pinned to every revision. Every answer cites the line it came from and says how
-            sure it is.
-          </p>
-          <div class="hero-actions">
-            <a class="button primary large" href="https://app.grogan.codes/">Open the app</a>
-            <a class="button large" href="#open-source">Run it in your AWS account</a>
+    <div class="page">
+      <nav class="nav" id="nav">
+        <div class="nav-inner">
+          <a class="nav-brand" href="/" aria-label="Grogan Code home">
+            <span class="nav-brand-title">Grogan Code</span>
+          </a>
+          <div class="nav-links" role="navigation" aria-label="Primary">
+            <a class="nav-link" href="#platform">Platform</a>
+            <a class="nav-link" href="#spaces">Spaces</a>
+            <a class="nav-link" href="#tokens">Tokens &amp; BYO</a>
+            <a class="nav-link" href="#self-host">Self-Host</a>
           </div>
-          <div class="install">
-            <code id="install-cmd">curl -fsSL https://grogan.codes/install | sh</code>
-            <button class="copy" type="button" data-copy="install-cmd">Copy</button>
+          <div class="nav-right">
+            <a class="nav-link" href="https://app.grogan.codes/login">Sign in</a>
+            <a
+              class="nav-pill"
+              href="https://github.com/Grogan-Development/grogan.codes"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 .5C5.65.5.5 5.65.5 12a11.5 11.5 0 007.86 10.93c.58.1.79-.25.79-.56v-2c-3.2.69-3.88-1.37-3.88-1.37-.52-1.33-1.27-1.69-1.27-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.68 1.25 3.33.96.1-.75.4-1.25.72-1.54-2.55-.29-5.24-1.27-5.24-5.67 0-1.25.45-2.28 1.18-3.08-.12-.29-.51-1.45.11-3.02 0 0 .96-.31 3.15 1.18a10.96 10.96 0 015.74 0c2.19-1.49 3.15-1.18 3.15-1.18.62 1.57.23 2.73.11 3.02.74.8 1.18 1.83 1.18 3.08 0 4.41-2.7 5.38-5.27 5.66.41.36.78 1.06.78 2.13v3.16c0 .31.21.67.8.56A11.5 11.5 0 0023.5 12C23.5 5.65 18.35.5 12 .5z" />
+              </svg>
+              <span>Apache-2.0</span>
+            </a>
+            <a class="btn btn-primary btn-sm" href="https://app.grogan.codes/">Open app</a>
           </div>
         </div>
-
-        <figure class="terminal" aria-label="Example: asking the code graph a question">
-          <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span></div>
-          <pre><span class="prompt">$</span> grogan ask "what calls Principal::allows?"
-<span class="dim">graph @ 0705846 · 214 files · exact 78%</span>
-
-<span class="tag exact">exact</span> crates/api/src/repo.rs:142     <b>push_refs</b>
-       if !principal.allows(Perm::Write, &amp;repo) {
-<span class="tag exact">exact</span> crates/source/src/merge.rs:219 <b>accept</b>
-       ensure!(principal.allows(Perm::Maintain, &amp;cr.repo), Denied);
-<span class="tag cand">cand</span> crates/api/src/admin.rs:88    <b>force_update</b>
-       principal.allows(Perm::Admin, &amp;repo)
-
-<span class="dim">3 callers · 1 inferred — verify before relying on it</span></pre>
-        </figure>
-      </section>
-
-      <section id="product" class="section">
-        <header class="section-head">
-          <p class="eyebrow">One graph, every workflow</p>
-          <h2>Everything reads the same revision.</h2>
-          <p class="lede">
-            Browsing, review, CI and AI all ask the same graph about the same commit, so a review
-            comment, a failing test and an answer in chat agree about what the code does.
-          </p>
-        </header>
-        <div class="features">
-          <article class="feature">
-            <p class="feature-num">01</p>
-            <h3>Source</h3>
-            <p>
-              Plain git over HTTPS, stored in S3. Protected refs only move through an atomic
-              compare-and-swap, so 50 parallel pushes give exactly one winner.
-            </p>
-          </article>
-          <article class="feature">
-            <p class="feature-num">02</p>
-            <h3>Change requests</h3>
-            <p>
-              Revisions, range diffs, comments that follow the code, stacks and a merge queue.
-              Approvals survive a clean rebase and reset on a real change.
-            </p>
-          </article>
-          <article class="feature">
-            <p class="feature-num">03</p>
-            <h3>Code graph</h3>
-            <p>
-              Definitions, calls, references and impact for Rust, TypeScript, Python and Go, from
-              compiler indexes where possible and inference where not.
-            </p>
-          </article>
-          <article class="feature">
-            <p class="feature-num">04</p>
-            <h3>Build</h3>
-            <p>
-              Steps are cached by their inputs, so an unchanged commit finishes in seconds. Jobs
-              run in throwaway micro-VMs with no access to your secrets unless you allow it.
-            </p>
-          </article>
-          <article class="feature">
-            <p class="feature-num">05</p>
-            <h3>Spaces</h3>
-            <p>
-              A cloud dev machine per repo that hibernates when you stop typing and resumes where
-              you left off. Connect from the CLI or VS Code.
-            </p>
-          </article>
-          <article class="feature">
-            <p class="feature-num">06</p>
-            <h3>Ask, review, fix</h3>
-            <p>
-              Ask questions, get advisory reviews, triage red builds and hand a failure to an agent
-              that opens a change request. AI never approves or merges.
-            </p>
-          </article>
-        </div>
-      </section>
-
-      <section id="graph" class="section split">
-        <div>
-          <p class="eyebrow">Answers you can check</p>
-          <h2>Exact when it knows. Labelled when it doesn't.</h2>
-          <p class="lede">
-            Results from a compiler index are marked <span class="tag exact">exact</span>.
-            Results the graph inferred are marked <span class="tag cand">cand</span> and ranked
-            below them. Every line inlines its source, so you and your agent spend fewer tokens
-            opening files to confirm.
-          </p>
-          <ul class="checks">
-            <li>Citations are checked against the graph before they're shown.</li>
-            <li>Answers name the revision they were computed at.</li>
-            <li>Queries have time and memory budgets, and say when they're truncated.</li>
-          </ul>
-        </div>
-        <figure class="panel" aria-label="Example change request impact">
-          <p class="panel-title">#42 Projection read cache · impact</p>
-          <ol class="gates">
-            <li class="bad"><span>✕</span> Required checks <small>test failed on c3d07f1</small></li>
-            <li><span>✓</span> Linear history <small>fast-forward possible</small></li>
-            <li class="bad"><span>✕</span> 1 code-owner approval <small>0 of 1</small></li>
-          </ol>
-          <p class="panel-sub">AI review · advisory</p>
-          <p class="finding">
-            <b>risk</b> crates/source/src/projection.rs:88 — cache key omits the grant's revocation
-            epoch.
-          </p>
-        </figure>
-      </section>
-
-      <section id="ai" class="section">
-        <header class="section-head">
-          <p class="eyebrow">Bring your own AI</p>
-          <h2>We don't resell tokens.</h2>
-          <p class="lede">
-            Connect what you already pay for. On the desktop app, AI runs on your machine with your
-            own login. In the browser and for background work, it runs in an isolated sandbox
-            billed to your key.
-          </p>
-        </header>
-        <ul class="providers">
-          <li><code>claude auth login</code><span>Claude Code</span></li>
-          <li><code>codex login</code><span>Codex CLI</span></li>
-          <li><code>ANTHROPIC_API_KEY</code><span>Anthropic API</span></li>
-          <li><code>grogan mcp</code><span>Graph tools for your local agent</span></li>
-        </ul>
-      </section>
-
-      <section id="open-source" class="section split dark">
-        <div>
-          <p class="eyebrow">Open source</p>
-          <h2>Use ours, or run your own.</h2>
-          <p class="lede">
-            Grogan Code is Apache-2.0. One command installs it into your own AWS account, with
-            near-zero idle cost: serverless control plane, Spot build hosts that only run while
-            you're building.
-          </p>
-        </div>
-        <figure class="terminal">
-          <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span></div>
-          <pre><span class="prompt">$</span> grogan install --region us-west-2
-<span class="dim">✓ control plane   Lambda · DynamoDB · S3
-✓ edge            CloudFront · WAF
-✓ build fleet     Spot Firecracker hosts (scale to zero)
-✓ web app         https://d1a2b3c4.cloudfront.net</span>
-<span class="prompt">$</span> grogan repo create api --from .</pre>
-        </figure>
-      </section>
-    </main>
-
-    <footer class="footer">
-      <p class="wordmark small"><span class="mark" aria-hidden="true">g/</span> Grogan Code</p>
-      <p class="muted">Built by Grogan Development. Licensed under Apache-2.0.</p>
-      <nav aria-label="Footer">
-        <a href="https://app.grogan.codes/">App</a>
-        <a href="https://github.com/Grogan-Development/grogan.codes">Source</a>
       </nav>
-    </footer>
+
+      <main class="main">
+        <!-- HERO -->
+        <section class="hero">
+          <div class="hero-blueprint" aria-hidden="true"></div>
+
+          <div class="container hero-inner">
+            <h1 class="hero-title display" data-rise style="--d: 60ms">
+              Everything GitHub does.<br />
+              <span>Built for code agents.</span>
+            </h1>
+
+            <p class="hero-sub" data-rise style="--d: 140ms">
+              Atomic Git on S3, stacked code reviews, compiler-indexed GraphWiki, 0.4s micro-VM builds, and AI-managed cloud Spaces. Use Grogan token credits or bring your own subscription.
+            </p>
+
+            <div class="hero-actions" data-rise style="--d: 220ms">
+              <div class="hero-buttons">
+                <a class="btn btn-primary btn-lg" href="https://app.grogan.codes/">
+                  <span>Open Grogan Code</span>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M5 12h14M13 5l7 7-7 7" />
+                  </svg>
+                </a>
+                <button class="cmd-pill" type="button" data-copy="install-cmd" aria-label="Copy install command">
+                  <span class="cmd-prompt">$</span>
+                  <code id="install-cmd">curl -fsSL https://grogan.codes/install | sh</code>
+                  <span class="cmd-copy-badge" data-copy-label>Copy</span>
+                </button>
+              </div>
+              <div class="hero-meta mono">
+                <span>Free personal repos</span>
+                <span class="sep">·</span>
+                <span>Flat org pricing ($0 per seat)</span>
+                <span class="sep">·</span>
+                <a href="#self-host">Self-host on AWS</a>
+              </div>
+            </div>
+
+            <!-- 5-PILLAR WORKBENCH: each tab deep-links to the real app screen -->
+            <div class="workbench-wrap" data-rise style="--d: 300ms">
+              <div class="pillar-rail" role="tablist" aria-label="Grogan Code 5 core pillars">
+                <button type="button" class="pillar-btn is-active" data-tab="review" role="tab" aria-selected="true">
+                  <span class="pillar-num">01</span>
+                  <span class="pillar-name">Code Reviews</span>
+                  <span class="pillar-tag">Stacks · Range diffs</span>
+                </button>
+                <button type="button" class="pillar-btn" data-tab="repos" role="tab" aria-selected="false">
+                  <span class="pillar-num">02</span>
+                  <span class="pillar-name">Repos</span>
+                  <span class="pillar-tag">Atomic Git on S3</span>
+                </button>
+                <button type="button" class="pillar-btn" data-tab="wiki" role="tab" aria-selected="false">
+                  <span class="pillar-num">03</span>
+                  <span class="pillar-name">Wiki</span>
+                  <span class="pillar-tag">SCIP · Citations</span>
+                </button>
+                <button type="button" class="pillar-btn" data-tab="spaces" role="tab" aria-selected="false">
+                  <span class="pillar-num">04</span>
+                  <span class="pillar-name">Spaces</span>
+                  <span class="pillar-tag">Cloud devboxes</span>
+                </button>
+                <button type="button" class="pillar-btn" data-tab="builds" role="tab" aria-selected="false">
+                  <span class="pillar-num">05</span>
+                  <span class="pillar-name">Builds</span>
+                  <span class="pillar-tag">0.4s Firecracker CI</span>
+                </button>
+              </div>
+
+              <div class="app-window" role="region" aria-label="Grogan Code live workspace preview">
+                <div class="app-topbar">
+                  <div class="app-dots" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                  </div>
+                  <div class="app-breadcrumb">
+                    <span class="app-mark">g/</span>
+                    <span class="muted">zack</span>
+                    <span class="slash">/</span>
+                    <span class="strong">grogan-code</span>
+                    <span class="app-badge">private</span>
+                  </div>
+                  <div class="app-topbar-right">
+                    <span class="app-chip">graph @ 0705846 · exact 94%</span>
+                    <span class="app-chip copper">AI · GLM-5.3 + Claude Code</span>
+                  </div>
+                </div>
+
+                <!-- PANE 1: CODE REVIEWS -->
+                <div class="app-pane is-active" data-pane="review">
+                  <div class="cr-header">
+                    <div class="cr-title-row">
+                      <span class="status-pill open">Open</span>
+                      <span class="cr-title">Projection read cache</span>
+                      <span class="cr-num">#42</span>
+                      <span class="cr-branch"><code>zack/projection-cache</code> → <code>main</code></span>
+                      <span class="cr-rev">r2 · c3d07f1</span>
+                    </div>
+                  </div>
+
+                  <div class="cr-grid">
+                    <div class="cr-main">
+                      <div class="diff-card">
+                        <div class="diff-bar">
+                          <span class="mono">crates/source/src/projection.rs</span>
+                          <div class="diff-stats">
+                            <span class="add">+24</span>
+                            <span class="del">−3</span>
+                          </div>
+                        </div>
+                        <div class="diff-code mono">
+                          <div class="dl ctx"><span class="ln">86</span><span>pub fn read(&amp;self, grant: &amp;Grant, rev: Oid) -&gt; Result&lt;Rows&gt; {</span></div>
+                          <div class="dl del"><span class="ln">87</span><span>-   let pack = self.packs.open(rev)?;</span></div>
+                          <div class="dl add"><span class="ln">87</span><span>+   let key = (grant.id, grant.epoch, rev);</span></div>
+                          <div class="dl add"><span class="ln">88</span><span>+   if let Some(rows) = self.cache.get(&amp;key) {</span></div>
+                          <div class="dl add"><span class="ln">89</span><span>+       return Ok(rows.clone());</span></div>
+                          <div class="dl add"><span class="ln">90</span><span>+   }</span></div>
+                          <div class="dl add"><span class="ln">91</span><span>+   let pack = self.packs.open(rev)?;</span></div>
+                          <div class="dl ctx"><span class="ln">92</span><span>    pack.project(grant.scope())</span></div>
+                        </div>
+                      </div>
+
+                      <div class="impact-card">
+                        <div class="impact-head">
+                          <span class="impact-title">Call graph blast radius</span>
+                          <span class="mono dim">3 callers across 2 crates · 0 broken</span>
+                        </div>
+                        <div class="impact-rows mono">
+                          <div class="impact-row">
+                            <span class="tier exact">exact</span>
+                            <span class="loc">crates/api/src/repo.rs:142</span>
+                            <span class="sym">push_refs</span>
+                            <span class="src">projection.read(&amp;grant, head_oid)?</span>
+                          </div>
+                          <div class="impact-row">
+                            <span class="tier exact">exact</span>
+                            <span class="loc">crates/source/src/merge.rs:219</span>
+                            <span class="sym">accept</span>
+                            <span class="src">projection.read(&amp;cr.grant, cr.target)?</span>
+                          </div>
+                          <div class="impact-row">
+                            <span class="tier cand">cand</span>
+                            <span class="loc">crates/api/src/admin.rs:88</span>
+                            <span class="sym">force_update</span>
+                            <span class="src">store.read(&amp;admin_grant, rev)</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <aside class="cr-side">
+                      <div class="side-box">
+                        <div class="side-head">Merge gates</div>
+                        <ul class="gate-list">
+                          <li class="ok">
+                            <span class="gate-icon">✓</span>
+                            <div>
+                              <div class="gate-name">Required checks</div>
+                              <div class="gate-sub">lint (0.4s cached) · test (18.2s)</div>
+                            </div>
+                          </li>
+                          <li class="ok">
+                            <span class="gate-icon">✓</span>
+                            <div>
+                              <div class="gate-name">Code-owner approval</div>
+                              <div class="gate-sub">1 of 1 on r2 (survived rebase)</div>
+                            </div>
+                          </li>
+                          <li class="ok">
+                            <span class="gate-icon">✓</span>
+                            <div>
+                              <div class="gate-name">Linear history</div>
+                              <div class="gate-sub">Atomic fast-forward ready</div>
+                            </div>
+                          </li>
+                        </ul>
+                        <a href="https://app.grogan.codes/r/zack/grogan-code/changes/42" class="merge-btn">
+                          <span>Queue atomic merge</span>
+                          <kbd>⌘⏎</kbd>
+                        </a>
+                      </div>
+
+                      <div class="side-box">
+                        <div class="side-head">
+                          <span>AI review</span>
+                          <span class="side-tag">advisory</span>
+                        </div>
+                        <div class="ai-finding">
+                          <span class="sev ok">resolved in r2</span>
+                          <p><code>projection.rs:87</code> includes <code>grant.epoch</code> in cache key.</p>
+                        </div>
+                      </div>
+                    </aside>
+                  </div>
+                </div>
+
+                <!-- PANE 2: REPOS -->
+                <div class="app-pane" data-pane="repos">
+                  <div class="repo-bar">
+                    <span class="branch-pill mono">⎇ main</span>
+                    <span class="mono dim">3 branches · 41 tags · Rust 92% · TypeScript 6%</span>
+                    <span class="spacer"></span>
+                    <span class="commit-pill mono">0705846 · CAS ref store &amp; S3 pack index · 2h ago ✓</span>
+                  </div>
+                  <div class="tree-table mono">
+                    <div class="tree-item">
+                      <span class="tree-icon">▸</span>
+                      <span class="tree-name">apps/</span>
+                      <span class="tree-msg">Leptos WASM client (Web, macOS, Linux, Windows, iOS)</span>
+                      <span class="tree-age">2h</span>
+                    </div>
+                    <div class="tree-item">
+                      <span class="tree-icon">▸</span>
+                      <span class="tree-name">crates/auth/</span>
+                      <span class="tree-msg">Principals, role grants, append-only audit log</span>
+                      <span class="tree-age">2h</span>
+                    </div>
+                    <div class="tree-item">
+                      <span class="tree-icon">▸</span>
+                      <span class="tree-name">crates/source/</span>
+                      <span class="tree-msg">S3 pack store, atomic compare-and-swap refs, merge queue</span>
+                      <span class="tree-age">2h</span>
+                    </div>
+                    <div class="tree-item">
+                      <span class="tree-icon">▸</span>
+                      <span class="tree-name">infra/</span>
+                      <span class="tree-msg">Single-command AWS CDK stack &amp; Spot Firecracker fleet</span>
+                      <span class="tree-age">2h</span>
+                    </div>
+                    <div class="tree-item">
+                      <span class="tree-icon">·</span>
+                      <span class="tree-name">Cargo.toml</span>
+                      <span class="tree-msg">Workspace manifest — deny unwrap/expect &amp; unsafe</span>
+                      <span class="tree-age">2h</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- PANE 3: DEEPWIKI -->
+                <div class="app-pane" data-pane="wiki">
+                  <div class="wiki-preview-grid">
+                    <div class="wiki-sidebar-mock">
+                      <div class="wiki-stamp-mock mono">
+                        <div class="dim">Last indexed · 0705846</div>
+                        <div class="strong">67 files · 94% exact</div>
+                      </div>
+                      <div class="wiki-nav-group">Core Subsystems</div>
+                      <div class="wiki-nav-item">Architecture Overview</div>
+                      <div class="wiki-nav-item">Authorization (crates/auth)</div>
+                      <div class="wiki-nav-item is-active mono">↳ Principal::allows</div>
+                      <div class="wiki-nav-item mono">↳ Role::grants</div>
+                      <div class="wiki-nav-item">Storage (crates/source)</div>
+                    </div>
+                    <div class="wiki-doc-mock">
+                      <div class="wiki-doc-top">
+                        <span class="mono strong">Principal::allows</span>
+                        <span class="cite-badge mono">⌖ crates/auth/src/principal.rs 54-60</span>
+                      </div>
+                      <p class="wiki-prose">
+                        Single permission gate for the workspace. Every mutating route in <code>crates/api</code> and <code>crates/source</code> must pass this check before opening a pack or moving refs.
+                      </p>
+                      <div class="diff-code mono">
+                        <div class="dl ctx"><span class="ln">54</span><span>pub fn allows(&amp;self, perm: Perm, repo: &amp;RepoId) -&gt; bool {</span></div>
+                        <div class="dl ctx"><span class="ln">55</span><span>    let role = self.role_in(repo);</span></div>
+                        <div class="dl add"><span class="ln">56</span><span>    let allowed = role.grants(perm);             // ⌖ role.rs:31 (exact)</span></div>
+                        <div class="dl add"><span class="ln">57</span><span>    self.audit.record(self, perm, repo, allowed); // ⌖ audit.rs:18 (exact)</span></div>
+                        <div class="dl ctx"><span class="ln">58</span><span>    allowed</span></div>
+                        <div class="dl ctx"><span class="ln">59</span><span>}</span></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- PANE 4: AI SPACES -->
+                <div class="app-pane" data-pane="spaces">
+                  <div class="spaces-grid">
+                    <div class="space-card is-running">
+                      <div class="space-top">
+                        <span class="status-pill open">Running · 8 vCPU</span>
+                        <span class="mono strong">space:projection-epoch-fix</span>
+                        <span class="mono dim">worktree: zack/projection-cache</span>
+                      </div>
+                      <div class="space-agent-row mono">
+                        <span class="tier def">Agent</span>
+                        <span>Claude Code (BYO sub) + Z.ai GLM-5.3 sub-agent</span>
+                        <span class="spacer"></span>
+                        <span class="add">Opened CR #42 · 212/212 tests passing</span>
+                      </div>
+                      <div class="build-log mono">
+                        <div><span class="prompt">space$</span> grogan mcp query --callers Principal::allows</div>
+                        <div class="dim">✓ 3 callers returned from graph @ 0705846 in 11ms</div>
+                        <div><span class="prompt">space$</span> cargo nextest run -p source</div>
+                        <div class="add">✓ PASS source::projection::revoked_grant_cannot_read_cache (0.04s)</div>
+                      </div>
+                    </div>
+                    <div class="space-side">
+                      <div class="side-box">
+                        <div class="side-head">Active Spaces (3)</div>
+                        <ul class="gate-list">
+                          <li>
+                            <span class="gate-icon">●</span>
+                            <div>
+                              <div class="gate-name">projection-epoch-fix</div>
+                              <div class="gate-sub">Claude Code · active now</div>
+                            </div>
+                          </li>
+                          <li>
+                            <span class="gate-icon">●</span>
+                            <div>
+                              <div class="gate-name">ci-retry-budget</div>
+                              <div class="gate-sub">Z.ai GLM-5.3 · PR #41 ready</div>
+                            </div>
+                          </li>
+                          <li>
+                            <span class="gate-icon dim">◐</span>
+                            <div>
+                              <div class="gate-name">trace-db-dev</div>
+                              <div class="gate-sub">Hibernated after 30m idle ($0/hr)</div>
+                            </div>
+                          </li>
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- PANE 5: BUILDS -->
+                <div class="app-pane" data-pane="builds">
+                  <div class="build-pane mono">
+                    <div class="build-steps">
+                      <div class="b-step">
+                        <span class="tier cached">cached</span>
+                        <span>lint · clippy + rustfmt</span>
+                        <span class="dim">0.4s · input hash 9f1e…a2</span>
+                      </div>
+                      <div class="b-step">
+                        <span class="tier ok">passed</span>
+                        <span>test · 212 nextest binaries</span>
+                        <span class="dim">18.2s · Spot Firecracker 8x16</span>
+                      </div>
+                      <div class="b-step">
+                        <span class="tier cached">cached</span>
+                        <span>graph · SCIP compiler index</span>
+                        <span class="dim">0.2s · revision 0705846</span>
+                      </div>
+                    </div>
+                    <div class="build-log">
+                      <div><span class="prompt">$</span> cargo nextest run --workspace</div>
+                      <div class="dim">Spot Firecracker micro-VM · c8i.4xlarge · us-west-2 (ephemeral, zero secret leak)</div>
+                      <div class="add">PASS [ 0.031s] source::projection::reads_scoped_rows</div>
+                      <div class="add">PASS [ 0.044s] source::projection::cache_hits_on_second_read</div>
+                      <div class="add">PASS [ 0.052s] source::projection::revoked_grant_cannot_read_cache</div>
+                      <div class="dim">Summary [ 18.210s] 212 passed, 0 failed</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <a
+                id="workbench-open"
+                class="workbench-open"
+                href="https://app.grogan.codes/r/zack/grogan-code/changes/42"
+              >
+                <span id="workbench-open-label">Open Code Reviews in grogan.code</span>
+                <span aria-hidden="true">→</span>
+              </a>
+            </div>
+          </div>
+        </section>
+
+        <!-- SECTION 1: 5 PILLARS -->
+        <section id="platform" class="sec-platform">
+          <div class="container">
+            <div class="section-head">
+              <div class="eyebrow">Full GitHub Replacement</div>
+              <h2 class="display">Five tools replaced by one code-graph native platform.</h2>
+            </div>
+
+            <div class="bento-grid">
+              <article class="tile bento-card">
+                <div class="bento-top">
+                  <span class="bento-num mono">01 / REPOS</span>
+                  <span class="bento-vs mono">Replaces GitHub Git</span>
+                </div>
+                <h3>Atomic Git on S3</h3>
+                <p>
+                  Protected refs move through compare-and-swap on S3. 50 parallel agent pushes produce one clean winner and zero corrupt packs.
+                </p>
+                <div class="bento-foot mono">
+                  <span>HTTPS &amp; SSH</span>
+                  <span>·</span>
+                  <span>Scoped tokens</span>
+                  <span>·</span>
+                  <span>Zero seat limits</span>
+                </div>
+              </article>
+
+              <article class="tile bento-card">
+                <div class="bento-top">
+                  <span class="bento-num mono">02 / CODE REVIEWS</span>
+                  <span class="bento-vs mono">Replaces Pull Requests + Graphite</span>
+                </div>
+                <h3>Stacked PRs that survive a rebase</h3>
+                <p>
+                  First-class patchset revisions, range diffs (`r1 → r2`), and a merge queue. Approvals persist across clean rebases and reset only when code changes.
+                </p>
+                <div class="bento-foot mono">
+                  <span>Range diffs</span>
+                  <span>·</span>
+                  <span>Call-graph blast radius</span>
+                  <span>·</span>
+                  <span>Merge queue</span>
+                </div>
+              </article>
+
+              <article class="tile bento-card bento-wide">
+                <div class="bento-wide-inner">
+                  <div>
+                    <div class="bento-top">
+                      <span class="bento-num mono">03 / GRAPHWIKI</span>
+                      <span class="bento-vs mono">Replaces Code Search + GraphWiki</span>
+                    </div>
+                    <h3>Every commit indexes a compiler code graph.</h3>
+                    <p>
+                      Auto-generated architecture pages, inline `path:line` citations, annotated source, and full call sites for Rust, TypeScript, Python, and Go. Compiler-verified edges are marked <span class="tier exact">exact</span>; dynamic edges are marked <span class="tier cand">cand</span>.
+                    </p>
+                  </div>
+                  <div class="bento-mini-code mono">
+                    <div class="bmc-head"><span>⌖ crates/auth/src/principal.rs 54-60</span><span class="tier exact">exact 94%</span></div>
+                    <div class="bmc-row"><span>api::push_refs</span><span class="dim">repo.rs:142 → Perm::Write</span></div>
+                    <div class="bmc-row"><span>source::accept</span><span class="dim">merge.rs:219 → Perm::Maintain</span></div>
+                    <div class="bmc-row"><span>api::force_update</span><span class="dim">admin.rs:88 → Perm::Admin (cand)</span></div>
+                  </div>
+                </div>
+              </article>
+
+              <article class="tile bento-card">
+                <div class="bento-top">
+                  <span class="bento-num mono">04 / BUILDS</span>
+                  <span class="bento-vs mono">Replaces GitHub Actions</span>
+                </div>
+                <h3>0.4s cached Firecracker CI</h3>
+                <p>
+                  Every step is content-addressed by its inputs. Unchanged steps return in 0.4s; cold steps boot in ephemeral Spot micro-VMs.
+                </p>
+                <div class="bento-foot mono">
+                  <span>Input-addressed cache</span>
+                  <span>·</span>
+                  <span>AI failure triage</span>
+                </div>
+              </article>
+
+              <article class="tile bento-card">
+                <div class="bento-top">
+                  <span class="bento-num mono">05 / SPACES</span>
+                  <span class="bento-vs mono">Replaces Codespaces</span>
+                </div>
+                <h3>Instant cloud devboxes for you &amp; your agents</h3>
+                <p>
+                  Per-branch cloud machines pre-warmed with your repo, build cache, and code graph. Hibernates to $0 when idle; resumes in under a second from Web, CLI, or VS Code.
+                </p>
+                <div class="bento-foot mono">
+                  <span>Parallel agent worktrees</span>
+                  <span>·</span>
+                  <span>Instant hibernate</span>
+                </div>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <!-- SECTION 2: AI SPACES -->
+        <section id="spaces" class="sec-split">
+          <div class="container split-inner">
+            <div class="split-copy">
+              <div class="eyebrow">Spaces · AI Manager Codespaces</div>
+              <h2 class="display">Dispatch 5 agents in parallel. Review one clean stack.</h2>
+              <p>
+                Stop babysitting local terminals. Spin up isolated cloud Spaces per task, assign any model or coding plan, and let agents query the compiler code graph over MCP before opening a Change Request.
+              </p>
+              <ul class="checklist">
+                <li>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l5 5L20 6" /></svg>
+                  <span><strong>Pre-warmed with your CI cache.</strong> Spaces boot with compiled targets and the SCIP graph ready.</span>
+                </li>
+                <li>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l5 5L20 6" /></svg>
+                  <span><strong>Connect from anywhere.</strong> Browser, desktop app, mobile, or `grogan ssh` from VS Code / Cursor.</span>
+                </li>
+                <li>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l5 5L20 6" /></svg>
+                  <span><strong>Human gated.</strong> Agents write code, triage red builds, and open PRs—they can never approve or merge.</span>
+                </li>
+              </ul>
+            </div>
+
+            <div class="split-visual">
+              <div class="tile manager-card">
+                <div class="manager-head">
+                  <span class="mono strong">AI Space Fleet · zack/grogan-code</span>
+                  <span class="mono dim">3 active · 1 hibernated</span>
+                </div>
+                <div class="manager-list">
+                  <div class="mgr-row">
+                    <div class="mgr-main">
+                      <span class="mgr-dot ok"></span>
+                      <span class="mono strong">space-42 · Fix cache revocation epoch</span>
+                    </div>
+                    <div class="mgr-meta mono">
+                      <span class="provider-pill">Claude Code (BYO)</span>
+                      <span class="add">CR #42 · 212/212 pass</span>
+                    </div>
+                  </div>
+                  <div class="mgr-row">
+                    <div class="mgr-main">
+                      <span class="mgr-dot ok"></span>
+                      <span class="mono strong">space-41 · Worker retry backoff</span>
+                    </div>
+                    <div class="mgr-meta mono">
+                      <span class="provider-pill">Z.ai GLM-5.3</span>
+                      <span class="add">CR #41 · Approved</span>
+                    </div>
+                  </div>
+                  <div class="mgr-row">
+                    <div class="mgr-main">
+                      <span class="mgr-dot run"></span>
+                      <span class="mono strong">space-43 · SCIP Go indexer benchmark</span>
+                    </div>
+                    <div class="mgr-meta mono">
+                      <span class="provider-pill">MiniMax M3 · Grogan Credits</span>
+                      <span class="warn-txt">Running nextest…</span>
+                    </div>
+                  </div>
+                  <div class="mgr-row is-idle">
+                    <div class="mgr-main">
+                      <span class="mgr-dot idle"></span>
+                      <span class="mono">space-39 · Scoped token UI</span>
+                    </div>
+                    <div class="mgr-meta mono">
+                      <span class="provider-pill">Xiaomi MiMo-V2.6</span>
+                      <span class="dim">Hibernated · $0/hr</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- SECTION 3: TOKENS + BYO -->
+        <section id="tokens" class="sec-tokens">
+          <div class="container">
+            <div class="section-head">
+              <div class="eyebrow">Managed Token Credits + Bring Your Own Sub</div>
+              <h2 class="display">Buy Grogan tokens, or plug in the plans you already pay for.</h2>
+              <p>
+                Top up one unified Grogan balance to route across every frontier and open-weight coding model at pass-through rates—or connect your existing subscriptions and coding plans for $0 markup.
+              </p>
+            </div>
+
+            <div class="token-modes">
+              <div class="tile mode-card mode-credits">
+                <div class="mode-top">
+                  <span class="mode-badge copper">Option A · Grogan Managed Credits</span>
+                  <span class="mono strong">Pay-as-you-go or Token Packs</span>
+                </div>
+                <h3>One balance for every major provider</h3>
+                <p>
+                  Instant access to Anthropic, OpenAI, Gemini, Grok, Z.ai, MiniMax, Xiaomi MiMo, DeepSeek, Kimi, and Qwen inside Spaces, PR Reviews, and GraphWiki—no separate API accounts required.
+                </p>
+                <div class="mode-tags mono">
+                  <span>Unified org billing</span>
+                  <span>·</span>
+                  <span>Zero-retention endpoints</span>
+                  <span>·</span>
+                  <span>Auto-failover routing</span>
+                </div>
+              </div>
+
+              <div class="tile mode-card mode-byo">
+                <div class="mode-top">
+                  <span class="mode-badge">Option B · Bring Your Own Sub / Plan</span>
+                  <span class="mono strong">$0 Platform Markup</span>
+                </div>
+                <h3>Use your existing coding plans &amp; CLI logins</h3>
+                <p>
+                  Already pay for Claude Code, Codex, Z.ai GLM Coding Plan, MiniMax Coding Plan, or Kimi? Authenticate your CLI or drop in your key—we orchestrate the harness and charge you nothing for tokens.
+                </p>
+                <div class="mode-tags mono">
+                  <span>claude auth login</span>
+                  <span>·</span>
+                  <span>codex login</span>
+                  <span>·</span>
+                  <span>Z.ai / MiniMax / MiMo plans</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="provider-matrix">
+              <div class="matrix-group">
+                <div class="matrix-head mono">
+                  <span>POPULAR CODING PLANS &amp; HIGH-EFFICIENCY MODELS</span>
+                  <span class="dim">Grogan Credits or BYO Plan / Key</span>
+                </div>
+                <div class="matrix-grid">
+                  <div class="model-tile">
+                    <div class="model-top">
+                      <span class="model-name">Z.ai (Zhipu GLM)</span>
+                      <span class="model-pill copper">Coding Plan + Credits</span>
+                    </div>
+                    <p class="model-models mono">GLM-5.3 · GLM-5.3 Flash</p>
+                    <p class="model-cmd mono dim">zai auth login / ZAI_API_KEY</p>
+                  </div>
+
+                  <div class="model-tile">
+                    <div class="model-top">
+                      <span class="model-name">MiniMax</span>
+                      <span class="model-pill copper">Coding Plan + Credits</span>
+                    </div>
+                    <p class="model-models mono">MiniMax-M3</p>
+                    <p class="model-cmd mono dim">MINIMAX_CODING_KEY · Grogan Credits</p>
+                  </div>
+
+                  <div class="model-tile">
+                    <div class="model-top">
+                      <span class="model-name">Xiaomi MiMo</span>
+                      <span class="model-pill copper">Token Plan + Credits</span>
+                    </div>
+                    <p class="model-models mono">MiMo-V2.6-Pro · MiMo-V2.6-Flash</p>
+                    <p class="model-cmd mono dim">MIMO_API_KEY · Fast CI triage</p>
+                  </div>
+
+                  <div class="model-tile">
+                    <div class="model-top">
+                      <span class="model-name">DeepSeek</span>
+                      <span class="model-pill copper">Credits + BYO</span>
+                    </div>
+                    <p class="model-models mono">DeepSeek-V4.1 · DeepSeek-V4 Pro</p>
+                    <p class="model-cmd mono dim">DEEPSEEK_API_KEY · Zero-retention</p>
+                  </div>
+
+                  <div class="model-tile">
+                    <div class="model-top">
+                      <span class="model-name">Moonshot Kimi</span>
+                      <span class="model-pill copper">Coding Plan + Credits</span>
+                    </div>
+                    <p class="model-models mono">Kimi-K3 · Kimi-K2.7 Code</p>
+                    <p class="model-cmd mono dim">kimi login / MOONSHOT_API_KEY</p>
+                  </div>
+
+                  <div class="model-tile">
+                    <div class="model-top">
+                      <span class="model-name">Qwen (Alibaba)</span>
+                      <span class="model-pill copper">Credits + BYO</span>
+                    </div>
+                    <p class="model-models mono">Qwen3.8-Max · Qwen3.8-Flash</p>
+                    <p class="model-cmd mono dim">DASHSCOPE_API_KEY · Grogan Credits</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="matrix-group">
+                <div class="matrix-head mono">
+                  <span>US FRONTIER HARNESSES &amp; OPEN ROUTING</span>
+                  <span class="dim">Grogan Credits or BYO Subscription</span>
+                </div>
+                <div class="matrix-grid">
+                  <div class="model-tile">
+                    <div class="model-top">
+                      <span class="model-name">Anthropic / Claude Code</span>
+                      <span class="model-pill">BYO Sub + Credits</span>
+                    </div>
+                    <p class="model-models mono">Claude Opus 5.5 · Sonnet 5.5</p>
+                    <p class="model-cmd mono dim">claude auth login · ANTHROPIC_API_KEY</p>
+                  </div>
+
+                  <div class="model-tile">
+                    <div class="model-top">
+                      <span class="model-name">OpenAI / Codex</span>
+                      <span class="model-pill">BYO Sub + Credits</span>
+                    </div>
+                    <p class="model-models mono">GPT-6 Astra · GPT-6.1 Sol · Codex</p>
+                    <p class="model-cmd mono dim">codex login · OPENAI_API_KEY</p>
+                  </div>
+
+                  <div class="model-tile">
+                    <div class="model-top">
+                      <span class="model-name">Google Gemini</span>
+                      <span class="model-pill">BYO + Credits</span>
+                    </div>
+                    <p class="model-models mono">Gemini 4 Argon · Gemini 3.8 Flash</p>
+                    <p class="model-cmd mono dim">gemini auth · GEMINI_API_KEY</p>
+                  </div>
+
+                  <div class="model-tile">
+                    <div class="model-top">
+                      <span class="model-name">xAI Grok</span>
+                      <span class="model-pill">BYO + Credits</span>
+                    </div>
+                    <p class="model-models mono">Grok 4.7 · Grok Build</p>
+                    <p class="model-cmd mono dim">grok login · XAI_API_KEY</p>
+                  </div>
+
+                  <div class="model-tile">
+                    <div class="model-top">
+                      <span class="model-name">Cursor &amp; Local Editors</span>
+                      <span class="model-pill">Native MCP</span>
+                    </div>
+                    <p class="model-models mono">Cursor · Devin Desktop · Zed · Hermes</p>
+                    <p class="model-cmd mono dim">grogan mcp serve</p>
+                  </div>
+
+                  <div class="model-tile">
+                    <div class="model-top">
+                      <span class="model-name">OpenRouter &amp; Custom</span>
+                      <span class="model-pill">Pass-through</span>
+                    </div>
+                    <p class="model-models mono">Any OpenAI-compatible endpoint</p>
+                    <p class="model-cmd mono dim">OPENROUTER_API_KEY · vLLM / Ollama</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- SECTION 4: SELF-HOST -->
+        <section id="self-host" class="sec-open">
+          <div class="container">
+            <div class="section-head open-head">
+              <div class="eyebrow">Open Source · Apache-2.0</div>
+              <div class="open-title-row">
+                <h2 class="display">Use our cloud, or bring your own.</h2>
+                <a class="aws-mark" href="https://aws.amazon.com/what-is-cloud-computing">
+                  <img src="powered-by-aws-white.png" width="200" height="72" alt="Powered by AWS Cloud Computing" />
+                </a>
+              </div>
+            </div>
+
+            <div class="open-grid">
+              <div class="tile open-term">
+                <div class="open-term-head">
+                  <span></span><span></span><span></span>
+                  <span class="open-term-title">~/infra</span>
+                </div>
+                <div class="open-term-body">
+                  <div><span class="prompt">$</span> grogan install --region us-west-2</div>
+                  <div class="dim">✓ control plane   Lambda · DynamoDB · S3</div>
+                  <div class="dim">✓ build &amp; spaces  Spot Firecracker fleet (scales to zero)</div>
+                  <div class="dim">✓ web app         <span class="accent">https://code.acme.dev</span></div>
+                  <div><span class="prompt">$</span> grogan repo create core --from .</div>
+                  <div class="dim">✓ Pushed main · indexed 1,843 files (94% exact) in 2.4s</div>
+                  <div class="cursor"><span class="prompt">$</span><span class="caret"></span></div>
+                </div>
+              </div>
+
+              <div class="tile open-pitch">
+                <ul class="open-pitch-list">
+                  <li>
+                    <span class="open-pitch-mark" aria-hidden="true">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+                    </span>
+                    <span><strong>Simple pricing on our cloud.</strong> Free personal repos. One flat org fee with $0 per-seat tax, plus metered compute and optional AI token packs.</span>
+                  </li>
+                  <li>
+                    <span class="open-pitch-mark" aria-hidden="true">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+                    </span>
+                    <span><strong>Self-host in your VPC.</strong> Serverless S3 + DynamoDB control plane and Spot Firecracker hosts that scale to $0 when idle.</span>
+                  </li>
+                  <li>
+                    <span class="open-pitch-mark" aria-hidden="true">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+                    </span>
+                    <span><strong>100% open source.</strong> Rust backend and Leptos WASM client across Web, macOS, Windows, Linux, iOS, and Android under Apache-2.0.</span>
+                  </li>
+                </ul>
+
+                <div class="open-pitch-footer">
+                  <div class="open-pitch-actions">
+                    <a class="btn btn-primary" href="https://app.grogan.codes/">
+                      Open Grogan Code
+                    </a>
+                    <a class="btn btn-ghost" href="https://github.com/Grogan-Development/grogan.codes" target="_blank" rel="noopener noreferrer">
+                      View source on GitHub
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- FINAL CTA -->
+        <section class="sec-cta">
+          <div class="container cta-inner">
+            <h2 class="display cta-title">Replace GitHub today.</h2>
+            <p class="cta-sub">
+              Repos, stacked code reviews, GraphWiki, Firecracker CI, and Spaces—with managed token credits or your own subscriptions.
+            </p>
+            <div class="cta-actions">
+              <a class="btn btn-primary btn-lg" href="https://app.grogan.codes/">
+                <span>Open Grogan Code</span>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M5 12h14M13 5l7 7-7 7" />
+                </svg>
+              </a>
+              <a class="btn btn-ghost btn-lg" href="https://github.com/Grogan-Development/grogan.codes" target="_blank" rel="noopener noreferrer">
+                Deploy on AWS (Apache-2.0)
+              </a>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <div class="footer-inner">
+          <div class="footer-brand">
+            <span>&copy; 2026 Grogan Development Group LLC · Licensed under Apache-2.0</span>
+          </div>
+          <div class="footer-links">
+            <a href="https://app.grogan.codes/">App</a>
+            <a href="https://app.grogan.codes/login">Sign in</a>
+            <a href="#platform">Platform</a>
+            <a href="#spaces">Spaces</a>
+            <a href="#tokens">Tokens &amp; BYO</a>
+            <a href="https://github.com/Grogan-Development/grogan.codes" target="_blank" rel="noopener noreferrer">GitHub</a>
+          </div>
+        </div>
+      </footer>
+    </div>
 
     <script>
+      const nav = document.getElementById("nav");
+      const onScroll = () => {
+        if (!nav) return;
+        nav.classList.toggle("is-scrolled", window.scrollY > 12);
+      };
+      window.addEventListener("scroll", onScroll, { passive: true });
+      onScroll();
+
       document.querySelectorAll("[data-copy]").forEach((button) => {
         button.addEventListener("click", async () => {
-          const text = document.getElementById(button.dataset.copy)?.textContent ?? "";
-          await navigator.clipboard.writeText(text);
-          button.textContent = "Copied";
-          setTimeout(() => (button.textContent = "Copy"), 1600);
+          const target = document.getElementById(button.dataset.copy);
+          const label = button.querySelector("[data-copy-label]");
+          if (!target || !label) return;
+          await navigator.clipboard.writeText(target.textContent ?? "");
+          label.textContent = "Copied";
+          setTimeout(() => {
+            label.textContent = "Copy";
+          }, 1600);
+        });
+      });
+
+      // Each pillar tab previews a pane AND deep-links to that real app screen.
+      const appLinks = {
+        review: {
+          href: "https://app.grogan.codes/r/zack/grogan-code/changes/42",
+          label: "Open Code Reviews in grogan.code",
+        },
+        repos: {
+          href: "https://app.grogan.codes/r/zack/grogan-code",
+          label: "Open Repos in grogan.code",
+        },
+        wiki: {
+          href: "https://app.grogan.codes/r/zack/grogan-code/graph",
+          label: "Open GraphWiki in grogan.code",
+        },
+        spaces: {
+          href: "https://app.grogan.codes/r/zack/grogan-code/spaces",
+          label: "Open Spaces in grogan.code",
+        },
+        builds: {
+          href: "https://app.grogan.codes/r/zack/grogan-code/builds/b-c3d07f1",
+          label: "Open Builds in grogan.code",
+        },
+      };
+      const openLink = document.getElementById("workbench-open");
+      const openLabel = document.getElementById("workbench-open-label");
+
+      document.querySelectorAll("[data-tab]").forEach((tab) => {
+        tab.addEventListener("click", () => {
+          const key = tab.dataset.tab;
+          document.querySelectorAll("[data-tab]").forEach((t) => {
+            const active = t.dataset.tab === key;
+            t.classList.toggle("is-active", active);
+            t.setAttribute("aria-selected", active ? "true" : "false");
+          });
+          document.querySelectorAll("[data-pane]").forEach((p) => {
+            p.classList.toggle("is-active", p.dataset.pane === key);
+          });
+          const link = appLinks[key];
+          if (link && openLink && openLabel) {
+            openLink.href = link.href;
+            openLabel.textContent = link.label;
+          }
         });
       });
     </script>

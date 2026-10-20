@@ -7,8 +7,8 @@ mod mock;
 use std::sync::Arc;
 
 use api_types::{
-    AiConnection, ApiError, BuildRun, Capabilities, ChangeDetail, ChangeSummary, InboxItem, Repo,
-    RepoHome, RepoRef, SearchResults, Session,
+    AiConnection, ApiError, BuildRun, BuildSummary, Capabilities, ChangeDetail, ChangeSummary,
+    InboxItem, Repo, RepoHome, RepoMap, RepoRef, SearchResults, Session, Space,
 };
 use futures::future::LocalBoxFuture;
 use leptos::prelude::*;
@@ -112,8 +112,13 @@ pub trait Platform: Send + Sync {
     fn repo_home(&self, repo: RepoRef) -> Reply<'_, RepoHome>;
     fn changes(&self, repo: RepoRef) -> Reply<'_, Vec<ChangeSummary>>;
     fn change(&self, repo: RepoRef, number: u32) -> Reply<'_, ChangeDetail>;
+    fn builds(&self, repo: RepoRef) -> Reply<'_, Vec<BuildSummary>>;
     fn build(&self, repo: RepoRef, id: String) -> Reply<'_, BuildRun>;
     fn search(&self, repo: RepoRef, query: String) -> Reply<'_, SearchResults>;
+    /// Selected code map (identities, supports edges, model provenance) for a repo.
+    fn repo_map(&self, repo: RepoRef) -> Reply<'_, RepoMap>;
+    /// All Spaces visible in an org (global board; repo pages filter by repo).
+    fn spaces(&self, org: String) -> Reply<'_, Vec<Space>>;
 }
 
 pub type SharedPlatform = Arc<dyn Platform>;

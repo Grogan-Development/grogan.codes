@@ -1,8 +1,8 @@
-use api_types::{AiProvider, AiRunsOn, InboxKind};
+use api_types::{AiRunsOn, CiPolicy, DeployTarget, InboxKind};
 use leptos::prelude::*;
 use leptos_router::components::A;
 
-use crate::components::load;
+use crate::components::{billing_label, load, provider_label};
 use crate::platform::{use_active_org, use_platform};
 
 #[component]
@@ -66,17 +66,44 @@ pub fn Repos() -> impl IntoView {
         let org = org.get();
         async move { platform.repos(org).await }
     });
+    let filter = RwSignal::new(String::new());
 
     view! {
-        <section class="page narrow">
+        <section class="page">
             <header class="page-head">
-                <h1>"Repositories"</h1>
+                <div>
+                    <h1>"Repositories"</h1>
+                    <p class="muted">
+                        "Content-addressed source on S3. Protected refs move only through Gate-2 accept + atomic CAS."
+                    </p>
+                </div>
                 <A href="/new" attr:class="button primary">"New repo"</A>
             </header>
-            {load(repos, |repos| {
+            <div class="search wide" role="search">
+                <input
+                    type="search"
+                    placeholder="Filter repos by name or description…"
+                    aria-label="Filter repositories"
+                    prop:value=move || filter.get()
+                    on:input=move |event| filter.set(event_target_value(&event))
+                />
+            </div>
+            {load(repos, move |repos| {
+                let query = filter.get().to_lowercase();
+                let visible: Vec<_> = repos
+                    .into_iter()
+                    .filter(|repo| {
+                        query.is_empty()
+                            || repo.id.name.to_lowercase().contains(&query)
+                            || repo.description.to_lowercase().contains(&query)
+                    })
+                    .collect();
+                if visible.is_empty() {
+                    return view! { <p class="empty">"No repositories match."</p> }.into_any();
+                }
                 view! {
                     <ul class="list">
-                        {repos
+                        {visible
                             .into_iter()
                             .map(|repo| {
                                 let languages = repo
@@ -85,6 +112,13 @@ pub fn Repos() -> impl IntoView {
                                     .map(|l| format!("{} {}%", l.name, l.percent))
                                     .collect::<Vec<_>>()
                                     .join(" · ");
+                                let ci = match repo.ci_policy {
+                                    CiPolicy::LoomCi => "loom-ci.toml",
+                                };
+                                let deploy = match repo.deploy_target {
+                                    DeployTarget::None => "no deploy target",
+                                    DeployTarget::LocalApply => "local apply script",
+                                };
                                 view! {
                                     <li class="list-row repo-row">
                                         <div>
@@ -92,16 +126,27 @@ pub fn Repos() -> impl IntoView {
                                                 {format!("{}/{}", repo.id.owner, repo.id.name)}
                                             </A>
                                             <p class="muted">{repo.description}</p>
+                                            <p class="small muted mono">
+                                                {format!(
+                                                    "protected {} · CI {} · {} · graph @ {} exact {}%",
+                                                    repo.protected_ref,
+                                                    ci,
+                                                    deploy,
+                                                    repo.graph.revision,
+                                                    repo.graph.exact_percent,
+                                                )}
+                                            </p>
                                         </div>
-                                        <span class="muted">{languages}</span>
-                                        <span class="muted">{format!("{} open", repo.open_changes)}</span>
-                                        <span class="muted">{repo.updated}</span>
+                                        <span class="muted small">{languages}</span>
+                                        <span class="muted small">{format!("{} open CRs", repo.open_changes)}</span>
+                                        <span class="muted small">{repo.updated}</span>
                                     </li>
                                 }
                             })
                             .collect_view()}
                     </ul>
                 }
+                    .into_any()
             })}
         </section>
     }
@@ -122,8 +167,9 @@ pub fn AiSettings() -> impl IntoView {
                 <h1>"AI connections"</h1>
             </header>
             <p class="lede">
-                "Grogan Code doesn't resell model access. Connect the tools and keys you already
-                pay for; reviews, triage and Fix this run on them."
+                "Two ways to pay for models: buy Grogan token credits (one balance routes to any "
+                "provider below), or bring your own subscription, coding plan, or API key at $0 markup. "
+                "Reviews, triage, DeepWiki maps and Spaces run on whichever you pick per agent."
             </p>
             {load(connections, |connections| {
                 view! {
@@ -131,18 +177,15 @@ pub fn AiSettings() -> impl IntoView {
                         {connections
                             .into_iter()
                             .map(|c| {
-                                let provider = match c.provider {
-                                    AiProvider::ClaudeCode => "Claude Code",
-                                    AiProvider::Codex => "Codex",
-                                    AiProvider::AnthropicApiKey => "Anthropic API key",
-                                };
+                                let provider = provider_label(c.provider);
                                 let place = match c.runs_on {
                                     AiRunsOn::ThisDevice => "Runs on this device with your login",
-                                    AiRunsOn::UserSandbox => "Runs in an isolated sandbox, billed to your key",
+                                    AiRunsOn::UserSandbox => "Runs in an isolated sandbox",
                                 };
                                 view! {
                                     <li class="list-row">
                                         <span class="row-title">{provider}</span>
+                                        <span class="badge cached">{billing_label(c.billing)}</span>
                                         <span class="muted mono">{c.account}</span>
                                         <span class="muted">{place}</span>
                                     </li>
@@ -155,13 +198,19 @@ pub fn AiSettings() -> impl IntoView {
             <Show when=move || !local_ai()>
                 <p class="note">
                     "Claude Code on this device is available in the desktop app. In the browser, AI
-                    work uses an API key you add here."
+                    work uses Grogan credits or a key/plan you add here."
                 </p>
             </Show>
             <div class="actions">
-                <button class="button">"Add API key"</button>
+                <button class="button primary">"Buy token credits"</button>
+                <button class="button">"Add API key / coding plan"</button>
                 <button class="button" disabled=move || !local_ai()>"Connect local Claude Code"</button>
             </div>
+            <p class="small muted" style="margin-top:10px">
+                "Managed credits and BYO plans cover Anthropic, OpenAI, Gemini, Grok, Z.ai GLM, MiniMax, "
+                "Xiaomi MiMo, DeepSeek, Kimi, Qwen and OpenRouter. Managed-credit runs record only "
+                "provider/model/route + token usage as provenance — never your credential."
+            </p>
         </section>
     }
 }

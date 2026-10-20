@@ -1,5 +1,36 @@
-use api_types::{ApiError, ChangeState, CheckState, GraphHit, StepState, Tier};
+use api_types::{
+    AiBilling, AiProvider, ApiError, ChangeState, CheckState, GraphHit, StepState, Tier,
+};
 use leptos::prelude::*;
+
+/// Display name for a model provider / harness.
+#[must_use]
+pub fn provider_label(provider: AiProvider) -> &'static str {
+    match provider {
+        AiProvider::ClaudeCode => "Claude Code",
+        AiProvider::Codex => "Codex",
+        AiProvider::AnthropicApiKey => "Anthropic API key",
+        AiProvider::OpenAiApiKey => "OpenAI API key",
+        AiProvider::Gemini => "Gemini",
+        AiProvider::Grok => "Grok",
+        AiProvider::Zai => "Z.ai GLM",
+        AiProvider::MiniMax => "MiniMax",
+        AiProvider::Mimo => "Xiaomi MiMo",
+        AiProvider::DeepSeek => "DeepSeek",
+        AiProvider::Kimi => "Kimi",
+        AiProvider::Qwen => "Qwen",
+        AiProvider::OpenRouter => "OpenRouter",
+    }
+}
+
+/// Chip label for how model usage is paid for.
+#[must_use]
+pub fn billing_label(billing: AiBilling) -> &'static str {
+    match billing {
+        AiBilling::ManagedCredits => "Grogan credits",
+        AiBilling::BringYourOwn => "BYO plan",
+    }
+}
 
 /// Renders a resource with shared loading and error states.
 pub fn load<T, V, F>(resource: LocalResource<Result<T, ApiError>>, render: F) -> impl IntoView

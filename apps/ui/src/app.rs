@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use api_types::{AiProvider, AiRunsOn};
+use api_types::AiRunsOn;
 use leptos::prelude::*;
 use leptos_router::{
     components::{A, Outlet, ParentRoute, Route, Router, Routes},
@@ -8,10 +8,10 @@ use leptos_router::{
     path,
 };
 
-use crate::components::NotBuilt;
+use crate::components::{NotBuilt, provider_label};
 use crate::pages::{
-    AiSettings, BuildView, ChangeList, ChangeView, Inbox, Login, NotFound, RepoCode, RepoLayout,
-    RepoSearch, Repos, Search,
+    AiSettings, BuildList, BuildView, ChangeList, ChangeView, Inbox, Login, NotFound, RepoCode,
+    RepoLayout, RepoSearch, RepoSpaces, Repos, Search, Spaces,
 };
 use crate::platform::{
     ActiveOrg, MockPlatform, PlatformHandle, PlatformKind, use_active_org, use_platform,
@@ -33,17 +33,18 @@ pub fn App() -> impl IntoView {
                         <Route path=path!("search") view=Search/>
                         <Route path=path!("settings/ai") view=AiSettings/>
                         <Route path=path!("ask") view=|| view! { <NotBuilt board="5" title="Ask"/> }/>
-                        <Route path=path!("spaces") view=|| view! { <NotBuilt board="6 · M14" title="Spaces"/> }/>
+                        <Route path=path!("spaces") view=Spaces/>
                         <Route path=path!("settings") view=|| view! { <NotBuilt board="M16 · D-Account" title="Settings"/> }/>
                         <Route path=path!("new") view=|| view! { <NotBuilt board="D4" title="New repo"/> }/>
                         <ParentRoute path=path!("r/:owner/:repo") view=RepoLayout>
                             <Route path=path!("") view=RepoCode/>
                             <Route path=path!("changes") view=ChangeList/>
                             <Route path=path!("changes/:n") view=ChangeView/>
+                            <Route path=path!("builds") view=BuildList/>
                             <Route path=path!("builds/:id") view=BuildView/>
                             <Route path=path!("graph") view=RepoSearch/>
-                            <Route path=path!("ask") view=|| view! { <NotBuilt board="5" title="Ask this repo"/> }/>
-                            <Route path=path!("spaces") view=|| view! { <NotBuilt board="6" title="Spaces"/> }/>
+                            <Route path=path!("ask") view=RepoSearch/>
+                            <Route path=path!("spaces") view=RepoSpaces/>
                             <Route path=path!("settings") view=|| view! { <NotBuilt board="D11" title="Repo settings"/> }/>
                         </ParentRoute>
                     </ParentRoute>
@@ -174,11 +175,7 @@ fn TopBar() -> impl IntoView {
                             let label = connections.first().map_or_else(
                                 || String::from("Connect AI"),
                                 |c| {
-                                    let provider = match c.provider {
-                                        AiProvider::ClaudeCode => "Claude Code",
-                                        AiProvider::Codex => "Codex",
-                                        AiProvider::AnthropicApiKey => "API key",
-                                    };
+                                    let provider = provider_label(c.provider);
                                     let place = match c.runs_on {
                                         AiRunsOn::ThisDevice => "this device",
                                         AiRunsOn::UserSandbox => "sandbox",
